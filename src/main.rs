@@ -6,15 +6,17 @@ pub mod models;
 use eframe::egui;
 use egui::{Color32, Frame, Pos2, Rect, Vec2};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::{
     draw::draw_scene,
-    helpers::{find_closest_wall, get_hovered_endpoints},
+    helpers::{extract_rooms, find_closest_wall, get_hovered_endpoints},
     input::handle_input,
-    models::Wall,
+    models::{AppSaveState, Wall},
 };
 
 pub const PIXELS_PER_METER: f32 = 50.0;
+const CONFIG_FILE: &str = ".roomplanner.json";
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Tool {
@@ -31,9 +33,10 @@ pub struct RoomPlannerApp {
     pub dragging_endpoints: Vec<(usize, bool)>,
     pub rooms: Vec<Vec<Pos2>>,
 
-    // --- Camera State ---
     pub pan_offset: Vec2,
-    pub zoom_factor: f32, // NEW
+    pub zoom_factor: f32,
+
+    pub current_file: Option<PathBuf>,
 }
 
 impl Default for RoomPlannerApp {
@@ -47,12 +50,12 @@ impl Default for RoomPlannerApp {
             dragging_endpoints: Vec::new(),
             rooms: Vec::new(),
             pan_offset: Vec2::ZERO,
-            zoom_factor: 1.0, // Default 100% scale
+            zoom_factor: 1.0,
+            current_file: None,
         }
     }
 }
 
-// --- Coordinate Converters ---
 impl RoomPlannerApp {
     pub fn world_to_screen(&self, p: Pos2) -> Pos2 {
         Pos2::new(p.x * self.zoom_factor, p.y * self.zoom_factor) + self.pan_offset
@@ -63,15 +66,98 @@ impl RoomPlannerApp {
             (p.y - self.pan_offset.y) / self.zoom_factor,
         )
     }
+
+    pub fn load_from_path(&mut self, path: &PathBuf) {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(state) = serde_json::from_str::<AppSaveState>(&data) {
+                self.walls = state.walls;
+                self.pan_offset = state.pan_offset;
+                self.zoom_factor = state.zoom_factor;
+                self.current_file = Some(path.clone());
+
+                self.rooms = extract_rooms(&self.walls);
+
+                let config =
+                    serde_json::json!({ "last_opened_file": path.to_string_lossy().to_string() });
+                let _ = std::fs::write(
+                    CONFIG_FILE,
+                    serde_json::to_string_pretty(&config).unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    pub fn save_to_path(&mut self, path: &PathBuf) {
+        let state = AppSaveState {
+            walls: self.walls.clone(),
+            pan_offset: self.pan_offset,
+            zoom_factor: self.zoom_factor,
+        };
+        if let Ok(data) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(path, data);
+            self.current_file = Some(path.clone());
+
+            let config =
+                serde_json::json!({ "last_opened_file": path.to_string_lossy().to_string() });
+            let _ = std::fs::write(
+                CONFIG_FILE,
+                serde_json::to_string_pretty(&config).unwrap_or_default(),
+            );
+        }
+    }
 }
 
 impl eframe::App for RoomPlannerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // --- TOP MENU BAR ---
         egui::Panel::top("top_panel").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("📐 RoomPlanner");
+            egui::MenuBar::default().ui(ui, |ui| {
+                ui.heading("📐");
                 ui.separator();
 
+                // 1. File Dropdown
+                ui.menu_button("File", |ui| {
+                    if ui.button("💾 Save").clicked() {
+                        if let Some(path) = &self.current_file {
+                            self.save_to_path(&path.clone());
+                        } else if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Room Plan", &["json"])
+                            .set_file_name("my_house.json")
+                            .save_file()
+                        {
+                            self.save_to_path(&path);
+                        }
+                        ui.close();
+                    }
+
+                    if ui.button("📂 Load").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Room Plan", &["json"])
+                            .pick_file()
+                        {
+                            self.load_from_path(&path);
+                        }
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    if ui.button(" Close").clicked() {
+                        self.walls.clear();
+                        self.selected_walls.clear();
+                        self.rooms.clear();
+                        self.wall_start_point = None;
+                        self.pan_offset = Vec2::ZERO;
+                        self.zoom_factor = 1.0;
+                        self.current_file = None;
+                        let _ = std::fs::remove_file(CONFIG_FILE);
+                        ui.close();
+                    }
+                });
+
+                ui.separator();
+
+                // 2. Tools
                 if ui
                     .selectable_value(&mut self.current_tool, Tool::Select, "✋ Select / Edit")
                     .clicked()
@@ -80,18 +166,19 @@ impl eframe::App for RoomPlannerApp {
                 }
                 ui.selectable_value(&mut self.current_tool, Tool::DrawWall, "🧱 Draw Wall");
 
-                ui.separator();
-                if ui.button("🗑️ Clear").clicked() {
-                    self.walls.clear();
-                    self.selected_walls.clear();
-                    self.rooms.clear();
-                    self.wall_start_point = None;
-                    self.pan_offset = Vec2::ZERO;
-                    self.zoom_factor = 1.0;
+                // 3. Current File Name (Aligned to the right)
+                if let Some(path) = &self.current_file {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format!(
+                            "📄 {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    });
                 }
             });
         });
 
+        // --- CENTRAL CANVAS ---
         let frame = Frame::central_panel(ui.style()).fill(Color32::WHITE);
 
         egui::CentralPanel::default()
@@ -100,11 +187,9 @@ impl eframe::App for RoomPlannerApp {
                 let (response, painter) =
                     ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
 
-                // --- CAMERA ZOOMING LOGIC ---
                 let mut zoom_multiplier = ui.ctx().input(|i| i.zoom_delta());
                 let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta.y);
 
-                // Allow standard mouse wheel to zoom (without needing Ctrl)
                 if scroll_delta != 0.0 {
                     zoom_multiplier *= 1.0 + (scroll_delta * 0.002);
                 }
@@ -113,16 +198,13 @@ impl eframe::App for RoomPlannerApp {
                     if let Some(mouse_pos) = ui.ctx().pointer_hover_pos() {
                         let old_zoom = self.zoom_factor;
                         self.zoom_factor *= zoom_multiplier;
-                        self.zoom_factor = self.zoom_factor.clamp(0.1, 20.0); // Restrict to 10% - 2000% scale
-
-                        // Zoom exactly towards the mouse pointer
+                        self.zoom_factor = self.zoom_factor.clamp(0.1, 20.0);
                         let mouse_vec = mouse_pos.to_vec2();
                         self.pan_offset = mouse_vec
                             - (mouse_vec - self.pan_offset) * (self.zoom_factor / old_zoom);
                     }
                 }
 
-                // --- CAMERA PANNING LOGIC ---
                 let is_panning = ui.ctx().input(|i| {
                     i.pointer.button_down(egui::PointerButton::Middle)
                         || i.key_down(egui::Key::Space)
@@ -134,7 +216,6 @@ impl eframe::App for RoomPlannerApp {
                     }
                 }
 
-                // Convert pointer coordinates to World Space
                 let pointer = ui
                     .ctx()
                     .pointer_hover_pos()
@@ -156,7 +237,6 @@ impl eframe::App for RoomPlannerApp {
                 let mut snapped_preview = None;
                 let mut snapped_wall_idx = None;
 
-                // Only handle tool input if we aren't panning
                 if !is_panning {
                     let (alignments, preview, wall_idx) =
                         handle_input(self, ui, &response, pointer, interact_pointer);
@@ -180,9 +260,27 @@ impl eframe::App for RoomPlannerApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let native_options = eframe::NativeOptions::default();
+
     eframe::run_native(
         "RoomPlanner",
-        eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(RoomPlannerApp::default()))),
+        native_options,
+        Box::new(|_cc| {
+            let mut app = RoomPlannerApp::default();
+
+            if let Ok(data) = std::fs::read_to_string(CONFIG_FILE) {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+                    if let Some(path_str) = config.get("last_opened_file").and_then(|v| v.as_str())
+                    {
+                        let path = std::path::PathBuf::from(path_str);
+                        if path.exists() {
+                            app.load_from_path(&path);
+                        }
+                    }
+                }
+            }
+
+            Ok(Box::new(app))
+        }),
     )
 }
