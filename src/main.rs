@@ -38,7 +38,7 @@ fn main() {
     use wasm_bindgen::JsCast;
 
     eframe::WebLogger::init(log::LevelFilter::Debug).ok();
-    let web_options = eframe::WebOptions::default();
+    let mut web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
         let document = web_sys::window().unwrap().document().unwrap();

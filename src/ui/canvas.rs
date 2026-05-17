@@ -77,5 +77,42 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                 snapped_preview,
                 snapped_wall_idx,
             );
+
+            // --- RESTORED 2D AVATAR DRAWING ---
+            let screen_pos = app.world_to_screen(app.camera_pos);
+            let dir = egui::vec2(app.camera_angle.cos(), app.camera_angle.sin());
+            let fov = 60.0_f32.to_radians();
+            let half_fov = fov / 2.0;
+
+            let left_ray = egui::vec2(
+                (app.camera_angle - half_fov).cos(),
+                (app.camera_angle - half_fov).sin(),
+            );
+            let right_ray = egui::vec2(
+                (app.camera_angle + half_fov).cos(),
+                (app.camera_angle + half_fov).sin(),
+            );
+
+            painter.line_segment(
+                [screen_pos, screen_pos + left_ray * 80.0],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 0, 0, 100)),
+            );
+            painter.line_segment(
+                [screen_pos, screen_pos + right_ray * 80.0],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 0, 0, 100)),
+            );
+            painter.circle_filled(screen_pos, 8.0, egui::Color32::from_rgb(40, 200, 100));
+            painter.circle_stroke(
+                screen_pos,
+                8.0,
+                egui::Stroke::new(2.0, egui::Color32::DARK_GREEN),
+            );
+            painter.line_segment(
+                [screen_pos, screen_pos + dir * 20.0],
+                egui::Stroke::new(3.0, egui::Color32::RED),
+            );
+
+            // --- CALL THE 3D ENGINE ---
+            crate::ui::view3d::process_and_draw(app, ui);
         });
 }

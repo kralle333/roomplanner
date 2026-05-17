@@ -406,39 +406,43 @@ pub fn draw_scene(
     if app.current_tool == Tool::Select && app.dragging_endpoints.is_empty() {
         if !hovered_endpoints.is_empty() {
             let (idx, is_start) = hovered_endpoints[0];
-            let ep = if is_start {
-                app.walls[idx].start
-            } else {
-                app.walls[idx].end
-            };
 
-            painter.circle_stroke(
-                app.world_to_screen(ep),
-                8.0,
-                Stroke::new(2.5, Color32::from_rgb(255, 150, 0)),
-            );
-            painter.circle_filled(
-                app.world_to_screen(ep),
-                4.0,
-                Color32::from_rgba_unmultiplied(255, 150, 0, 150),
-            );
+            // FIX: Safely try to get the wall. If it was just deleted, this returns None and safely skips drawing!
+            if let Some(hovered_wall) = app.walls.get(idx) {
+                let ep = if is_start {
+                    hovered_wall.start
+                } else {
+                    hovered_wall.end
+                };
 
-            if hovered_endpoints.len() == 1 {
-                let mut shared = false;
-                for (i, w) in app.walls.iter().enumerate() {
-                    if i != idx && (w.start.distance(ep) < 2.0 || w.end.distance(ep) < 2.0) {
-                        shared = true;
-                        break;
+                painter.circle_stroke(
+                    app.world_to_screen(ep),
+                    8.0,
+                    Stroke::new(2.5, Color32::from_rgb(255, 150, 0)),
+                );
+                painter.circle_filled(
+                    app.world_to_screen(ep),
+                    4.0,
+                    Color32::from_rgba_unmultiplied(255, 150, 0, 150),
+                );
+
+                if hovered_endpoints.len() == 1 {
+                    let mut shared = false;
+                    for (i, w) in app.walls.iter().enumerate() {
+                        if i != idx && (w.start.distance(ep) < 2.0 || w.end.distance(ep) < 2.0) {
+                            shared = true;
+                            break;
+                        }
                     }
-                }
-                if shared {
-                    painter.line_segment(
-                        [
-                            app.world_to_screen(app.walls[idx].start),
-                            app.world_to_screen(app.walls[idx].end),
-                        ],
-                        Stroke::new(4.0, Color32::from_rgba_unmultiplied(255, 150, 0, 200)),
-                    );
+                    if shared {
+                        painter.line_segment(
+                            [
+                                app.world_to_screen(hovered_wall.start),
+                                app.world_to_screen(hovered_wall.end),
+                            ],
+                            Stroke::new(4.0, Color32::from_rgba_unmultiplied(255, 150, 0, 200)),
+                        );
+                    }
                 }
             }
         }

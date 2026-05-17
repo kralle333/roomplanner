@@ -20,6 +20,10 @@ pub struct RoomPlannerApp {
     pub pan_offset: Vec2,
     pub zoom_factor: f32,
     pub current_file: Option<PathBuf>,
+
+    // NEW: 3D Camera State
+    pub camera_pos: Pos2,
+    pub camera_angle: f32,
 }
 
 impl Default for RoomPlannerApp {
@@ -35,6 +39,9 @@ impl Default for RoomPlannerApp {
             pan_offset: Vec2::ZERO,
             zoom_factor: 1.0,
             current_file: None,
+            // Initialize the player near the center of the canvas
+            camera_pos: Pos2::new(200.0, 200.0),
+            camera_angle: 0.0,
         }
     }
 }
