@@ -1,10 +1,9 @@
 use crate::{
-    PIXELS_PER_METER, RoomPlannerApp, Tool,
-    helpers::{closest_point_on_segment, triangulate},
+    app::{RoomPlannerApp, PIXELS_PER_METER},
+    geometry::{math::closest_point_on_segment, rooms::triangulate},
+    models::Tool,
 };
-use eframe::egui;
-use egui::{Color32, Painter, Pos2, Shape, Stroke, vec2};
-use epaint::Rect;
+use eframe::egui::{self, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 
 pub fn draw_scene(
     app: &RoomPlannerApp,
@@ -66,12 +65,11 @@ pub fn draw_scene(
 
                     let mut offset_dir = normal;
                     if let Some(mouse_pos) = pointer {
-                        let to_mouse = mouse_pos - snap_pos;
-                        if to_mouse.dot(normal) < 0.0 {
+                        if (mouse_pos - snap_pos).dot(normal) < 0.0 {
                             offset_dir = -normal;
                         }
                     }
-                    let offset = offset_dir * (25.0 / app.zoom_factor); // Constant Screen size
+                    let offset = offset_dir * (25.0 / app.zoom_factor);
 
                     let p_start = wall.start + offset;
                     let p_end = wall.end + offset;
@@ -82,6 +80,7 @@ pub fn draw_scene(
 
                     let dim_color = Color32::from_rgb(0, 150, 200);
                     let stroke = Stroke::new(1.0, dim_color);
+                    let faint = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 150, 200, 100));
 
                     painter.line_segment(
                         [app.world_to_screen(p_start), app.world_to_screen(p_cursor)],
@@ -91,23 +90,20 @@ pub fn draw_scene(
                         [app.world_to_screen(p_cursor), app.world_to_screen(p_end)],
                         stroke,
                     );
-
-                    let faint_stroke =
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 150, 200, 100));
                     painter.line_segment(
                         [
                             app.world_to_screen(wall.start),
                             app.world_to_screen(p_start),
                         ],
-                        faint_stroke,
+                        faint,
                     );
                     painter.line_segment(
                         [app.world_to_screen(snap_pos), app.world_to_screen(p_cursor)],
-                        faint_stroke,
+                        faint,
                     );
                     painter.line_segment(
                         [app.world_to_screen(wall.end), app.world_to_screen(p_end)],
-                        faint_stroke,
+                        faint,
                     );
 
                     painter.circle_filled(app.world_to_screen(p_start), 2.0, dim_color);
@@ -149,7 +145,6 @@ pub fn draw_scene(
 
                 if start.distance(end) > (5.0 / app.zoom_factor) {
                     let length_m = start.distance(end) / PIXELS_PER_METER;
-
                     painter.text(
                         app.world_to_screen(
                             start.lerp(end, 0.5) + vec2(0.0, -15.0 / app.zoom_factor),
@@ -178,7 +173,6 @@ pub fn draw_scene(
                                 let dir1 = (start - wall.start).normalized();
                                 let dir2 = (start - wall.end).normalized();
                                 let new_dir = (end - start).normalized();
-
                                 if dir1.dot(new_dir) > dir2.dot(new_dir) {
                                     prev_dir = Some(dir1);
                                 } else {
@@ -192,7 +186,6 @@ pub fn draw_scene(
                     if let Some(p_dir) = prev_dir {
                         let dir_back = -p_dir;
                         let dir_new = (end - start).normalized();
-
                         let angle1 = dir_back.angle();
                         let angle2 = dir_new.angle();
 
@@ -205,7 +198,6 @@ pub fn draw_scene(
                         }
 
                         let display_angle = diff.abs().to_degrees();
-
                         let radius = 30.0 / app.zoom_factor;
                         let steps = 32;
                         let mut arc_points = Vec::new();
@@ -220,7 +212,6 @@ pub fn draw_scene(
                             arc_points,
                             Stroke::new(2.0, Color32::from_rgb(0, 150, 255)),
                         ));
-
                         let mid_angle = angle1 + diff / 2.0;
                         let text_pos = start
                             + vec2(mid_angle.cos(), mid_angle.sin())
@@ -238,7 +229,6 @@ pub fn draw_scene(
                         if abs_angle < 0.0 {
                             abs_angle += 360.0;
                         }
-
                         painter.text(
                             app.world_to_screen(
                                 start.lerp(end, 0.5) + vec2(0.0, 15.0 / app.zoom_factor),
@@ -256,7 +246,6 @@ pub fn draw_scene(
 
     for (idx, wall) in app.walls.iter().enumerate() {
         let mut is_selected = app.selected_walls.contains(&idx);
-
         if let Some(rect) = app.selection_rect {
             if rect.contains(wall.start) || rect.contains(wall.end) {
                 is_selected = true;
@@ -271,7 +260,6 @@ pub fn draw_scene(
         } else {
             Color32::BLACK
         };
-
         let stroke_width = if is_selected || is_hovered { 8.0 } else { 6.0 };
 
         painter.line_segment(
@@ -296,7 +284,6 @@ pub fn draw_scene(
             if angle < 0.0 {
                 angle += 360.0;
             }
-
             painter.text(
                 app.world_to_screen(
                     wall.start.lerp(wall.end, 0.5) + vec2(0.0, -12.0 / app.zoom_factor),
@@ -306,6 +293,113 @@ pub fn draw_scene(
                 egui::FontId::proportional(13.0),
                 Color32::from_rgb(0, 80, 200),
             );
+        }
+
+        if is_hovered && app.current_tool == Tool::Select && !is_selected {
+            let mut split_points = vec![wall.start, wall.end];
+            for (other_idx, other_wall) in app.walls.iter().enumerate() {
+                if other_idx == idx {
+                    continue;
+                }
+                for &ep in &[other_wall.start, other_wall.end] {
+                    let proj = closest_point_on_segment(ep, wall.start, wall.end);
+                    if ep.distance(proj) < 2.0 {
+                        split_points.push(proj);
+                    }
+                }
+            }
+
+            split_points.sort_by(|a, b| {
+                wall.start
+                    .distance(*a)
+                    .partial_cmp(&wall.start.distance(*b))
+                    .unwrap()
+            });
+            split_points.dedup_by(|a, b| a.distance(*b) < 2.0);
+
+            let dir = (wall.end - wall.start).normalized();
+            let normal = vec2(-dir.y, dir.x);
+            let mut offset_dir = normal;
+            if let Some(mouse_pos) = pointer {
+                if (mouse_pos - wall.start).dot(normal) < 0.0 {
+                    offset_dir = -normal;
+                }
+            }
+
+            let dim_color = Color32::from_rgb(255, 140, 0);
+            let text_color = Color32::from_rgb(220, 100, 0);
+            let stroke = Stroke::new(1.5, dim_color);
+            let faint_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 140, 0, 80));
+
+            let total_offset = offset_dir * (40.0 / app.zoom_factor);
+            let p_start = wall.start + total_offset;
+            let p_end = wall.end + total_offset;
+            let total_len = wall.start.distance(wall.end) / PIXELS_PER_METER;
+
+            painter.line_segment(
+                [app.world_to_screen(p_start), app.world_to_screen(p_end)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    app.world_to_screen(wall.start),
+                    app.world_to_screen(p_start),
+                ],
+                faint_stroke,
+            );
+            painter.line_segment(
+                [app.world_to_screen(wall.end), app.world_to_screen(p_end)],
+                faint_stroke,
+            );
+            painter.circle_filled(app.world_to_screen(p_start), 2.5, dim_color);
+            painter.circle_filled(app.world_to_screen(p_end), 2.5, dim_color);
+
+            painter.text(
+                app.world_to_screen(
+                    p_start.lerp(p_end, 0.5) + offset_dir * (10.0 / app.zoom_factor),
+                ),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.2} m", total_len),
+                egui::FontId::proportional(14.0),
+                text_color,
+            );
+
+            if split_points.len() > 2 {
+                let sub_offset = offset_dir * (20.0 / app.zoom_factor);
+                for i in 0..split_points.len() - 1 {
+                    let s1 = split_points[i];
+                    let s2 = split_points[i + 1];
+                    let ps1 = s1 + sub_offset;
+                    let ps2 = s2 + sub_offset;
+                    let sub_len = s1.distance(s2) / PIXELS_PER_METER;
+
+                    if sub_len > 0.1 {
+                        painter.line_segment(
+                            [app.world_to_screen(ps1), app.world_to_screen(ps2)],
+                            stroke,
+                        );
+                        painter.line_segment(
+                            [app.world_to_screen(s1), app.world_to_screen(ps1)],
+                            faint_stroke,
+                        );
+                        painter.line_segment(
+                            [app.world_to_screen(s2), app.world_to_screen(ps2)],
+                            faint_stroke,
+                        );
+                        painter.circle_filled(app.world_to_screen(ps1), 2.5, dim_color);
+                        painter.circle_filled(app.world_to_screen(ps2), 2.5, dim_color);
+                        painter.text(
+                            app.world_to_screen(
+                                ps1.lerp(ps2, 0.5) + offset_dir * (10.0 / app.zoom_factor),
+                            ),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{:.2} m", sub_len),
+                            egui::FontId::proportional(12.0),
+                            text_color,
+                        );
+                    }
+                }
+            }
         }
     }
 

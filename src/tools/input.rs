@@ -1,10 +1,12 @@
 use crate::{
-    RoomPlannerApp, Tool,
-    helpers::{compute_snapping, extract_rooms, find_closest_wall, get_hovered_endpoints},
-    models::Wall,
+    app::RoomPlannerApp,
+    geometry::{
+        rooms::extract_rooms,
+        snapping::{compute_snapping, find_closest_wall, get_hovered_endpoints},
+    },
+    models::{Tool, Wall},
 };
-use eframe::egui;
-use egui::{Pos2, Rect, Response, Ui};
+use eframe::egui::{self, Pos2, Rect, Response, Ui};
 
 pub fn handle_input(
     app: &mut RoomPlannerApp,
@@ -40,7 +42,9 @@ pub fn handle_input(
 
     match app.current_tool {
         Tool::DrawWall => {
-            if let Some(mouse_pos) = pointer {
+            let active_pos = interact_pointer.or(pointer);
+
+            if let Some(mouse_pos) = active_pos {
                 let (snapped_pos, alignments, wall_idx) = compute_snapping(
                     mouse_pos,
                     app.wall_start_point,
@@ -72,7 +76,10 @@ pub fn handle_input(
             let pressed_now = response.drag_started() || response.clicked();
 
             if pressed_now {
-                let press_origin = ui.ctx().input(|i| i.pointer.press_origin());
+                let press_origin = ui
+                    .ctx()
+                    .input(|i| i.pointer.press_origin())
+                    .map(|p| app.screen_to_world(p));
                 let exact_pos = press_origin.or(interact_pointer).or(pointer);
 
                 if let Some(mouse_pos) = exact_pos {
@@ -86,7 +93,6 @@ pub fn handle_input(
 
                     if !exact_endpoints.is_empty() {
                         app.dragging_endpoints = exact_endpoints.clone();
-
                         if !ui.ctx().input(|i| i.modifiers.shift) {
                             app.selected_walls.clear();
                         }
@@ -120,7 +126,6 @@ pub fn handle_input(
                         } else {
                             app.walls[first_idx].start
                         };
-
                         let ignored_indices: Vec<usize> =
                             app.dragging_endpoints.iter().map(|(i, _)| *i).collect();
                         let (snapped_pos, alignments, _) = compute_snapping(
@@ -143,7 +148,7 @@ pub fn handle_input(
                         }
                         app.rooms = extract_rooms(&app.walls);
                     } else if !app.selected_walls.is_empty() && app.selection_rect.is_none() {
-                        let delta = response.drag_delta() / app.zoom_factor; // Scale delta for proper World Space shift
+                        let delta = response.drag_delta() / app.zoom_factor;
                         for &idx in &app.selected_walls {
                             if let Some(wall) = app.walls.get_mut(idx) {
                                 wall.start += delta;
@@ -151,8 +156,14 @@ pub fn handle_input(
                             }
                         }
                         app.rooms = extract_rooms(&app.walls);
-                    } else if let Some(rect) = &mut app.selection_rect {
-                        *rect = Rect::from_two_pos(rect.min, mouse_pos);
+                    } else if app.selection_rect.is_some() {
+                        // 1. Extract the values using an immutable borrow first
+                        if let Some(press_origin) = ui.ctx().input(|i| i.pointer.press_origin()) {
+                            let origin_world = app.screen_to_world(press_origin);
+
+                            // 2. Safely apply the mutable borrow after the math is done
+                            app.selection_rect = Some(Rect::from_two_pos(origin_world, mouse_pos));
+                        }
                     }
                 }
             }

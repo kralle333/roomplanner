@@ -1,11 +1,24 @@
 [package]
 name = "roomplanner"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-eframe = { version = "0.34.2", features = ["serde"] }
-epaint = { version = "0.34.2", features = ["serde"] }
-rfd = "0.17.2"
+eframe = { version = "0.34.2", features = ["persistence"] } # or whatever version you currently have
+egui = { version = "0.34.2", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+rfd = "0.17.2"
+
+# --- WASM Specific Dependencies ---
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4.2" , features = ["wasm_js"]}
+wasm-bindgen-futures = "0.4.71"
+wasm-bindgen = "0.2"
+log = "0.4.29"
+web-sys = { version = "0.3.98", features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement"
+] }
