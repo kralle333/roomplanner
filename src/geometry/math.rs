@@ -36,3 +36,16 @@ pub fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
 
     (u >= 0.0) && (v >= 0.0) && (u + v < 1.0)
 }
+
+/// Distance along a ray (with unit direction) to segment a-b, if it hits.
+pub fn ray_segment_distance(origin: Pos2, dir: Vec2, a: Pos2, b: Pos2) -> Option<f32> {
+    let seg = b - a;
+    let det = dir.x * seg.y - dir.y * seg.x;
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let diff = a - origin;
+    let t = (diff.x * seg.y - diff.y * seg.x) / det;
+    let u = (diff.x * dir.y - diff.y * dir.x) / det;
+    (t >= 0.0 && (0.0..=1.0).contains(&u)).then_some(t)
+}

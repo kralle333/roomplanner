@@ -13,7 +13,7 @@ egui-wgpu = "0.34.2"
 wgpu = "29.0.3"
 glam = "0.32.1"
 gltf = "1.4.1"
-bytemuck = { version = "1.25.0", features = ["derive"] }
+bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
 
 # --- WASM Specific Dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]

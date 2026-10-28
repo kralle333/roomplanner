@@ -1,0 +1,862 @@
+{
+ "walls": [
+  {
+   "start": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "end": {
+    "x": 450.0,
+    "y": 0.0
+   },
+   "openings": [
+    {
+     "kind": "Window",
+     "offset": 2.5,
+     "width": 2.0,
+     "height": 1.4,
+     "sill": 0.8,
+     "flip_hinge": false,
+     "flip_side": false
+    },
+    {
+     "kind": "Window",
+     "offset": 7.0,
+     "width": 1.2,
+     "height": 1.2,
+     "sill": 0.9,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 450.0,
+    "y": 0.0
+   },
+   "end": {
+    "x": 450.0,
+    "y": 350.0
+   },
+   "openings": [
+    {
+     "kind": "Window",
+     "offset": 5.25,
+     "width": 1.2,
+     "height": 1.2,
+     "sill": 0.9,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 450.0,
+    "y": 350.0
+   },
+   "end": {
+    "x": 0.0,
+    "y": 350.0
+   },
+   "openings": [
+    {
+     "kind": "Window",
+     "offset": 5.5,
+     "width": 1.2,
+     "height": 1.2,
+     "sill": 1.1,
+     "flip_hinge": false,
+     "flip_side": false
+    },
+    {
+     "kind": "GlassDoor",
+     "offset": 8.0,
+     "width": 0.9,
+     "height": 2.2,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": true
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 0.0,
+    "y": 350.0
+   },
+   "end": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "openings": [
+    {
+     "kind": "Door",
+     "offset": 2.0,
+     "width": 0.9,
+     "height": 2.1,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": true
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 250.0,
+    "y": 0.0
+   },
+   "end": {
+    "x": 250.0,
+    "y": 350.0
+   },
+   "openings": [
+    {
+     "kind": "Door",
+     "offset": 3.0,
+     "width": 0.9,
+     "height": 2.1,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": false
+    },
+    {
+     "kind": "Door",
+     "offset": 4.05,
+     "width": 0.9,
+     "height": 2.1,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 250.0,
+    "y": 175.0
+   },
+   "end": {
+    "x": 450.0,
+    "y": 175.0
+   },
+   "openings": []
+  }
+ ],
+ "furniture": [
+  {
+   "name": "Rug",
+   "kind": "Box",
+   "position": {
+    "x": 80.0,
+    "y": 80.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 2.4,
+   "depth": 1.7,
+   "height": 0.01,
+   "elevation": 0.0,
+   "color": [
+    205,
+    190,
+    165
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Sofa",
+   "kind": {
+    "Sofa": {
+     "seat_height": 0.42,
+     "arm_width": 0.15,
+     "back_depth": 0.2
+    }
+   },
+   "position": {
+    "x": 26.25,
+    "y": 80.0
+   },
+   "rotation": 4.71238898038469,
+   "width": 2.2,
+   "depth": 0.95,
+   "height": 0.8,
+   "elevation": 0.0,
+   "color": [
+    128,
+    145,
+    120
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Coffee table",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.03,
+     "leg_size": 0.04,
+     "round": false
+    }
+   },
+   "position": {
+    "x": 82.5,
+    "y": 80.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 1.1,
+   "depth": 0.6,
+   "height": 0.45,
+   "elevation": 0.0,
+   "color": [
+    196,
+    154,
+    108
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Armchair",
+   "kind": {
+    "Sofa": {
+     "seat_height": 0.42,
+     "arm_width": 0.12,
+     "back_depth": 0.18
+    }
+   },
+   "position": {
+    "x": 82.5,
+    "y": 24.0
+   },
+   "rotation": 0.0,
+   "width": 0.8,
+   "depth": 0.85,
+   "height": 0.8,
+   "elevation": 0.0,
+   "color": [
+    150,
+    120,
+    95
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "TV bench",
+   "kind": "Box",
+   "position": {
+    "x": 236.25,
+    "y": 80.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 1.8,
+   "depth": 0.45,
+   "height": 0.5,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Floor lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Floor",
+     "shade": "Cone",
+     "shade_height": 0.3,
+     "lumens": 800.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 15.0,
+    "y": 15.0
+   },
+   "rotation": 0.0,
+   "width": 0.4,
+   "depth": 0.4,
+   "height": 1.5,
+   "elevation": 0.0,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Bookcase",
+   "kind": {
+    "Shelf": {
+     "shelves": 6
+    }
+   },
+   "position": {
+    "x": 10.0,
+    "y": 165.0
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.8,
+   "depth": 0.3,
+   "height": 2.0,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Dining table",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.03,
+     "leg_size": 0.06,
+     "round": false
+    }
+   },
+   "position": {
+    "x": 100.0,
+    "y": 250.0
+   },
+   "rotation": 0.0,
+   "width": 1.6,
+   "depth": 0.9,
+   "height": 0.75,
+   "elevation": 0.0,
+   "color": [
+    196,
+    154,
+    108
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 80.0,
+    "y": 215.0
+   },
+   "rotation": 0.0,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 120.0,
+    "y": 215.0
+   },
+   "rotation": 0.0,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 80.0,
+    "y": 285.0
+   },
+   "rotation": 3.141592653589793,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 120.0,
+    "y": 285.0
+   },
+   "rotation": 3.141592653589793,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Dining pendant",
+   "kind": {
+    "Lamp": {
+     "style": "Pendant",
+     "shade": "Cone",
+     "shade_height": 0.0,
+     "lumens": 1000.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 100.0,
+    "y": 250.0
+   },
+   "rotation": 0.0,
+   "width": 0.4,
+   "depth": 0.4,
+   "height": 0.25,
+   "elevation": 1.5,
+   "color": [
+    45,
+    45,
+    50
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Kitchen counter",
+   "kind": "Box",
+   "position": {
+    "x": 180.0,
+    "y": 332.5
+   },
+   "rotation": 3.141592653589793,
+   "width": 2.4,
+   "depth": 0.6,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Fridge",
+   "kind": "Box",
+   "position": {
+    "x": 231.25,
+    "y": 300.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 0.6,
+   "depth": 0.65,
+   "height": 1.85,
+   "elevation": 0.0,
+   "color": [
+    225,
+    228,
+    230
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Plant",
+   "kind": "Plant",
+   "position": {
+    "x": 16.0,
+    "y": 332.5
+   },
+   "rotation": 0.0,
+   "width": 0.5,
+   "depth": 0.5,
+   "height": 1.2,
+   "elevation": 0.0,
+   "color": [
+    190,
+    110,
+    80
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Double bed",
+   "kind": {
+    "Bed": {
+     "headboard_height": 1.0
+    }
+   },
+   "position": {
+    "x": 397.5,
+    "y": 87.5
+   },
+   "rotation": 1.5707963267948966,
+   "width": 1.6,
+   "depth": 2.0,
+   "height": 0.5,
+   "elevation": 0.0,
+   "color": [
+    200,
+    205,
+    215
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Nightstand",
+   "kind": "Box",
+   "position": {
+    "x": 437.5,
+    "y": 30.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 0.45,
+   "depth": 0.4,
+   "height": 0.55,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Nightstand",
+   "kind": "Box",
+   "position": {
+    "x": 437.5,
+    "y": 145.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 0.45,
+   "depth": 0.4,
+   "height": 0.55,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Bedside lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Table",
+     "shade": "Drum",
+     "shade_height": 0.2,
+     "lumens": 400.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 437.5,
+    "y": 30.0
+   },
+   "rotation": 0.0,
+   "width": 0.3,
+   "depth": 0.3,
+   "height": 0.45,
+   "elevation": 0.55,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Bedside lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Table",
+     "shade": "Drum",
+     "shade_height": 0.2,
+     "lumens": 400.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 437.5,
+    "y": 145.0
+   },
+   "rotation": 0.0,
+   "width": 0.3,
+   "depth": 0.3,
+   "height": 0.45,
+   "elevation": 0.55,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Wardrobe",
+   "kind": "Box",
+   "position": {
+    "x": 287.5,
+    "y": 17.5
+   },
+   "rotation": 0.0,
+   "width": 1.2,
+   "depth": 0.6,
+   "height": 2.0,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Ceiling lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Pendant",
+     "shade": "Globe",
+     "shade_height": 0.0,
+     "lumens": 1000.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 350.0,
+    "y": 87.5
+   },
+   "rotation": 0.0,
+   "width": 0.35,
+   "depth": 0.35,
+   "height": 0.35,
+   "elevation": 2.0,
+   "color": [
+    250,
+    248,
+    240
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Single bed",
+   "kind": {
+    "Bed": {
+     "headboard_height": 0.9
+    }
+   },
+   "position": {
+    "x": 300.0,
+    "y": 297.5
+   },
+   "rotation": 3.141592653589793,
+   "width": 0.9,
+   "depth": 2.0,
+   "height": 0.5,
+   "elevation": 0.0,
+   "color": [
+    215,
+    200,
+    190
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Desk",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.025,
+     "leg_size": 0.04,
+     "round": false
+    }
+   },
+   "position": {
+    "x": 432.5,
+    "y": 262.5
+   },
+   "rotation": 1.5707963267948966,
+   "width": 1.2,
+   "depth": 0.6,
+   "height": 0.73,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Desk chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.48
+    }
+   },
+   "position": {
+    "x": 400.0,
+    "y": 262.5
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.55,
+   "depth": 0.55,
+   "height": 1.05,
+   "elevation": 0.0,
+   "color": [
+    45,
+    45,
+    50
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Desk lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Table",
+     "shade": "Drum",
+     "shade_height": 0.2,
+     "lumens": 400.0,
+     "kelvin": 4000.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 437.5,
+    "y": 242.5
+   },
+   "rotation": 0.0,
+   "width": 0.3,
+   "depth": 0.3,
+   "height": 0.45,
+   "elevation": 0.73,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Low shelf",
+   "kind": {
+    "Shelf": {
+     "shelves": 3
+    }
+   },
+   "position": {
+    "x": 375.0,
+    "y": 187.5
+   },
+   "rotation": 0.0,
+   "width": 1.5,
+   "depth": 0.4,
+   "height": 0.8,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Rug",
+   "kind": "Box",
+   "position": {
+    "x": 360.0,
+    "y": 280.0
+   },
+   "rotation": 0.0,
+   "width": 1.4,
+   "depth": 1.0,
+   "height": 0.01,
+   "elevation": 0.0,
+   "color": [
+    170,
+    185,
+    200
+   ],
+   "options": [],
+   "active_option": 0
+  }
+ ],
+ "finishes": {
+  "wall_color": [
+   246,
+   246,
+   244
+  ],
+  "floor": "LightOak"
+ },
+ "pan_offset": {
+  "x": 80.0,
+  "y": 80.0
+ },
+ "zoom_factor": 1.0
+}

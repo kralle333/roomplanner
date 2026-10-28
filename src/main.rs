@@ -1,5 +1,7 @@
 pub mod app;
+pub mod furniture;
 pub mod geometry;
+pub mod history;
 pub mod models;
 pub mod storage;
 pub mod tools;
@@ -9,13 +11,16 @@ use app::RoomPlannerApp;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
-    let native_options = eframe::NativeOptions::default();
+    let native_options = eframe::NativeOptions {
+        depth_buffer: 32,
+        ..Default::default()
+    };
 
     eframe::run_native(
         "RoomPlanner",
         native_options,
-        Box::new(|_cc| {
-            let mut app = RoomPlannerApp::default();
+        Box::new(|cc| {
+            let mut app = RoomPlannerApp::new(cc);
 
             if let Ok(data) = std::fs::read_to_string(storage::CONFIG_FILE) {
                 if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -38,7 +43,10 @@ fn main() {
     use wasm_bindgen::JsCast;
 
     eframe::WebLogger::init(log::LevelFilter::Debug).ok();
-    let mut web_options = eframe::WebOptions::default();
+    let web_options = eframe::WebOptions {
+        depth_buffer: 32,
+        ..Default::default()
+    };
 
     wasm_bindgen_futures::spawn_local(async {
         let document = web_sys::window().unwrap().document().unwrap();
@@ -52,7 +60,7 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|_cc| Ok(Box::new(RoomPlannerApp::default()))),
+                Box::new(|cc| Ok(Box::new(RoomPlannerApp::new(cc)))),
             )
             .await
             .expect("failed to start eframe");

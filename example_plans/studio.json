@@ -1,0 +1,561 @@
+{
+ "walls": [
+  {
+   "start": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "end": {
+    "x": 300.0,
+    "y": 0.0
+   },
+   "openings": [
+    {
+     "kind": "Window",
+     "offset": 1.5,
+     "width": 1.2,
+     "height": 1.2,
+     "sill": 0.9,
+     "flip_hinge": false,
+     "flip_side": false
+    },
+    {
+     "kind": "Window",
+     "offset": 4.2,
+     "width": 2.0,
+     "height": 1.4,
+     "sill": 0.8,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 300.0,
+    "y": 0.0
+   },
+   "end": {
+    "x": 300.0,
+    "y": 250.0
+   },
+   "openings": [
+    {
+     "kind": "Door",
+     "offset": 4.2,
+     "width": 0.9,
+     "height": 2.1,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": true
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 300.0,
+    "y": 250.0
+   },
+   "end": {
+    "x": 0.0,
+    "y": 250.0
+   },
+   "openings": [
+    {
+     "kind": "Window",
+     "offset": 5.0,
+     "width": 0.6,
+     "height": 0.6,
+     "sill": 1.5,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  },
+  {
+   "start": {
+    "x": 0.0,
+    "y": 250.0
+   },
+   "end": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "openings": []
+  },
+  {
+   "start": {
+    "x": 110.0,
+    "y": 250.0
+   },
+   "end": {
+    "x": 110.0,
+    "y": 150.0
+   },
+   "openings": []
+  },
+  {
+   "start": {
+    "x": 110.0,
+    "y": 150.0
+   },
+   "end": {
+    "x": 0.0,
+    "y": 150.0
+   },
+   "openings": [
+    {
+     "kind": "Door",
+     "offset": 0.45,
+     "width": 0.8,
+     "height": 2.1,
+     "sill": 0.0,
+     "flip_hinge": false,
+     "flip_side": false
+    }
+   ]
+  }
+ ],
+ "furniture": [
+  {
+   "name": "Double bed",
+   "kind": {
+    "Bed": {
+     "headboard_height": 1.0
+    }
+   },
+   "position": {
+    "x": 52.5,
+    "y": 62.5
+   },
+   "rotation": 4.71238898038469,
+   "width": 1.4,
+   "depth": 2.0,
+   "height": 0.5,
+   "elevation": 0.0,
+   "color": [
+    200,
+    205,
+    215
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Nightstand",
+   "kind": "Box",
+   "position": {
+    "x": 12.5,
+    "y": 15.0
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.45,
+   "depth": 0.4,
+   "height": 0.55,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Bedside lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Table",
+     "shade": "Drum",
+     "shade_height": 0.2,
+     "lumens": 400.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 12.5,
+    "y": 15.0
+   },
+   "rotation": 0.0,
+   "width": 0.3,
+   "depth": 0.3,
+   "height": 0.45,
+   "elevation": 0.55,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Wardrobe",
+   "kind": "Box",
+   "position": {
+    "x": 30.0,
+    "y": 132.5
+   },
+   "rotation": 3.141592653589793,
+   "width": 1.0,
+   "depth": 0.6,
+   "height": 2.0,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Rug",
+   "kind": "Box",
+   "position": {
+    "x": 210.0,
+    "y": 67.5
+   },
+   "rotation": 0.0,
+   "width": 2.0,
+   "depth": 1.4,
+   "height": 0.01,
+   "elevation": 0.0,
+   "color": [
+    205,
+    190,
+    165
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Sofa",
+   "kind": {
+    "Sofa": {
+     "seat_height": 0.42,
+     "arm_width": 0.15,
+     "back_depth": 0.2
+    }
+   },
+   "position": {
+    "x": 210.0,
+    "y": 25.0
+   },
+   "rotation": 0.0,
+   "width": 2.0,
+   "depth": 0.9,
+   "height": 0.8,
+   "elevation": 0.0,
+   "color": [
+    90,
+    100,
+    115
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Coffee table",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.03,
+     "leg_size": 0.04,
+     "round": false
+    }
+   },
+   "position": {
+    "x": 210.0,
+    "y": 72.5
+   },
+   "rotation": 0.0,
+   "width": 1.0,
+   "depth": 0.55,
+   "height": 0.45,
+   "elevation": 0.0,
+   "color": [
+    196,
+    154,
+    108
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "TV bench",
+   "kind": "Box",
+   "position": {
+    "x": 210.0,
+    "y": 122.5
+   },
+   "rotation": 3.141592653589793,
+   "width": 1.6,
+   "depth": 0.4,
+   "height": 0.5,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Reading lamp",
+   "kind": {
+    "Lamp": {
+     "style": "Floor",
+     "shade": "Cone",
+     "shade_height": 0.3,
+     "lumens": 800.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 282.5,
+    "y": 17.5
+   },
+   "rotation": 0.0,
+   "width": 0.4,
+   "depth": 0.4,
+   "height": 1.5,
+   "elevation": 0.0,
+   "color": [
+    235,
+    228,
+    212
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Desk",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.025,
+     "leg_size": 0.04,
+     "round": false
+    }
+   },
+   "position": {
+    "x": 282.5,
+    "y": 100.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 1.2,
+   "depth": 0.6,
+   "height": 0.73,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Desk chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.48
+    }
+   },
+   "position": {
+    "x": 250.0,
+    "y": 100.0
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.55,
+   "depth": 0.55,
+   "height": 1.05,
+   "elevation": 0.0,
+   "color": [
+    45,
+    45,
+    50
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Round table",
+   "kind": {
+    "Table": {
+     "top_thickness": 0.03,
+     "leg_size": 0.08,
+     "round": true
+    }
+   },
+   "position": {
+    "x": 180.0,
+    "y": 200.0
+   },
+   "rotation": 0.0,
+   "width": 0.9,
+   "depth": 0.9,
+   "height": 0.75,
+   "elevation": 0.0,
+   "color": [
+    196,
+    154,
+    108
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 147.5,
+    "y": 200.0
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Chair",
+   "kind": {
+    "Chair": {
+     "seat_height": 0.45
+    }
+   },
+   "position": {
+    "x": 212.5,
+    "y": 200.0
+   },
+   "rotation": 1.5707963267948966,
+   "width": 0.45,
+   "depth": 0.5,
+   "height": 0.9,
+   "elevation": 0.0,
+   "color": [
+    120,
+    85,
+    60
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Pendant",
+   "kind": {
+    "Lamp": {
+     "style": "Pendant",
+     "shade": "Cone",
+     "shade_height": 0.0,
+     "lumens": 1000.0,
+     "kelvin": 2700.0,
+     "on": true
+    }
+   },
+   "position": {
+    "x": 180.0,
+    "y": 200.0
+   },
+   "rotation": 0.0,
+   "width": 0.4,
+   "depth": 0.4,
+   "height": 0.25,
+   "elevation": 1.5,
+   "color": [
+    45,
+    45,
+    50
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Plant",
+   "kind": "Plant",
+   "position": {
+    "x": 282.5,
+    "y": 162.5
+   },
+   "rotation": 0.0,
+   "width": 0.5,
+   "depth": 0.5,
+   "height": 1.2,
+   "elevation": 0.0,
+   "color": [
+    190,
+    110,
+    80
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Bathtub",
+   "kind": "Box",
+   "position": {
+    "x": 60.0,
+    "y": 230.0
+   },
+   "rotation": 3.141592653589793,
+   "width": 1.6,
+   "depth": 0.7,
+   "height": 0.55,
+   "elevation": 0.0,
+   "color": [
+    250,
+    250,
+    250
+   ],
+   "options": [],
+   "active_option": 0
+  },
+  {
+   "name": "Vanity",
+   "kind": "Box",
+   "position": {
+    "x": 13.75,
+    "y": 177.5
+   },
+   "rotation": 4.71238898038469,
+   "width": 0.6,
+   "depth": 0.45,
+   "height": 0.85,
+   "elevation": 0.0,
+   "color": [
+    240,
+    240,
+    235
+   ],
+   "options": [],
+   "active_option": 0
+  }
+ ],
+ "finishes": {
+  "wall_color": [
+   246,
+   246,
+   244
+  ],
+  "floor": "LightOak"
+ },
+ "pan_offset": {
+  "x": 80.0,
+  "y": 80.0
+ },
+ "zoom_factor": 1.0
+}

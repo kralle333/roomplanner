@@ -46,6 +46,10 @@ pub fn extract_rooms(walls: &[Wall]) -> Vec<Vec<Pos2>> {
         }
     }
 
+    // Trace the faces of the planar wall graph: from every directed edge, keep taking the
+    // sharpest right turn (measured from the edge we arrived along) until we are back at
+    // the starting edge. Each directed edge belongs to exactly one face; enclosed rooms
+    // come out clockwise on screen, the outside of the plan counter-clockwise.
     let mut rooms = Vec::new();
     let mut visited_edges = HashSet::new();
 
@@ -55,68 +59,80 @@ pub fn extract_rooms(walls: &[Wall]) -> Vec<Vec<Pos2>> {
         }
 
         let mut polygon = Vec::new();
-        let mut curr_u = start_u;
-        let mut curr_v = start_v;
-        let mut is_valid_cycle = true;
+        let (mut curr_u, mut curr_v) = (start_u, start_v);
+        let mut closed = false;
 
-        loop {
+        for _ in 0..edges.len() {
             visited_edges.insert((curr_u, curr_v));
             polygon.push(vertices[curr_u]);
 
-            if curr_v == start_u {
-                break;
-            }
-            if polygon.contains(&vertices[curr_v]) {
-                is_valid_cycle = false;
-                break;
-            }
-
-            let in_dir = vertices[curr_v] - vertices[curr_u];
-            let in_angle = in_dir.angle();
-
-            let mut best_w = None;
-            let mut max_angle_diff = -1.0;
-
+            let back_angle = (vertices[curr_u] - vertices[curr_v]).angle();
+            let mut best: Option<(f32, usize)> = None;
             for &(from, to) in &edges {
-                if from == curr_v && to != curr_u {
-                    let out_dir = vertices[to] - vertices[curr_v];
-                    let mut diff = out_dir.angle() - in_angle;
-                    while diff < 0.0 {
-                        diff += std::f32::consts::TAU;
-                    }
-                    while diff >= std::f32::consts::TAU {
-                        diff -= std::f32::consts::TAU;
-                    }
-
-                    if diff > max_angle_diff {
-                        max_angle_diff = diff;
-                        best_w = Some(to);
-                    }
+                if from != curr_v {
+                    continue;
+                }
+                let mut diff = (vertices[to] - vertices[curr_v]).angle() - back_angle;
+                diff = diff.rem_euclid(std::f32::consts::TAU);
+                // Going back the way we came is only allowed at a dead end.
+                if to == curr_u {
+                    diff = 0.0;
+                }
+                if best.is_none_or(|(d, _)| diff > d) {
+                    best = Some((diff, to));
                 }
             }
-
-            if let Some(w) = best_w {
-                curr_u = curr_v;
-                curr_v = w;
-            } else {
-                is_valid_cycle = false;
+            let Some((_, next)) = best else {
+                break;
+            };
+            (curr_u, curr_v) = (curr_v, next);
+            if (curr_u, curr_v) == (start_u, start_v) {
+                closed = true;
                 break;
             }
         }
 
-        if is_valid_cycle && polygon.len() >= 3 {
-            let mut area = 0.0;
-            for i in 0..polygon.len() {
-                let p1 = polygon[i];
-                let p2 = polygon[(i + 1) % polygon.len()];
-                area += (p2.x - p1.x) * (p2.y + p1.y);
-            }
-            if area > 2500.0 {
-                rooms.push(polygon);
-            }
+        if !closed {
+            continue;
+        }
+        remove_spikes(&mut polygon);
+        if polygon.len() < 3 {
+            continue;
+        }
+        let mut area = 0.0;
+        for i in 0..polygon.len() {
+            let p1 = polygon[i];
+            let p2 = polygon[(i + 1) % polygon.len()];
+            area += (p2.x - p1.x) * (p2.y + p1.y);
+        }
+        // Rooms are traced clockwise on screen, which gives a negative area here.
+        if area < -2500.0 {
+            rooms.push(polygon);
         }
     }
     rooms
+}
+
+/// Removes back-and-forth detours left in a face by walls that end inside a room.
+fn remove_spikes(polygon: &mut Vec<Pos2>) {
+    let mut changed = true;
+    while changed && polygon.len() >= 3 {
+        changed = false;
+        let n = polygon.len();
+        for i in 0..n {
+            let prev = polygon[(i + n - 1) % n];
+            let next = polygon[(i + 1) % n];
+            if prev.distance(next) < 1e-3 {
+                // prev -> p -> prev: drop p and the duplicate.
+                let (a, b) = (i, (i + 1) % n);
+                let (first, second) = if a > b { (a, b) } else { (b, a) };
+                polygon.remove(first);
+                polygon.remove(second);
+                changed = true;
+                break;
+            }
+        }
+    }
 }
 
 pub fn triangulate(polygon: &[Pos2]) -> Vec<[Pos2; 3]> {
@@ -182,4 +198,61 @@ pub fn triangulate(polygon: &[Pos2]) -> Vec<[Pos2; 3]> {
         triangles.push([verts[0], verts[1], verts[2]]);
     }
     triangles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wall(a: (f32, f32), b: (f32, f32)) -> Wall {
+        Wall::new(Pos2::new(a.0, a.1), Pos2::new(b.0, b.1))
+    }
+
+    #[test]
+    fn finds_two_rooms_split_by_a_wall_ending_on_other_walls() {
+        let walls = vec![
+            wall((0.0, 0.0), (500.0, 0.0)),
+            wall((500.0, 0.0), (500.0, 200.0)),
+            wall((500.0, 200.0), (0.0, 200.0)),
+            wall((0.0, 200.0), (0.0, 0.0)),
+            wall((300.0, 0.0), (300.0, 200.0)),
+        ];
+        assert_eq!(extract_rooms(&walls).len(), 2);
+    }
+
+    #[test]
+    fn single_room_is_found_once() {
+        let walls = vec![
+            wall((0.0, 0.0), (200.0, 0.0)),
+            wall((200.0, 0.0), (200.0, 200.0)),
+            wall((200.0, 200.0), (0.0, 200.0)),
+            wall((0.0, 200.0), (0.0, 0.0)),
+        ];
+        let rooms = extract_rooms(&walls);
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].len(), 4);
+    }
+
+    #[test]
+    fn half_wall_inside_a_room_does_not_hide_it() {
+        let walls = vec![
+            wall((0.0, 0.0), (200.0, 0.0)),
+            wall((200.0, 0.0), (200.0, 200.0)),
+            wall((200.0, 200.0), (0.0, 200.0)),
+            wall((0.0, 200.0), (0.0, 0.0)),
+            wall((100.0, 0.0), (100.0, 80.0)),
+        ];
+        let rooms = extract_rooms(&walls);
+        assert_eq!(rooms.len(), 1);
+        assert!(!triangulate(&rooms[0]).is_empty());
+    }
+
+    #[test]
+    fn open_walls_make_no_room() {
+        let walls = vec![
+            wall((0.0, 0.0), (200.0, 0.0)),
+            wall((200.0, 0.0), (200.0, 200.0)),
+        ];
+        assert!(extract_rooms(&walls).is_empty());
+    }
 }
