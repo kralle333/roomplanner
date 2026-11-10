@@ -60,6 +60,7 @@ pub fn make(
         height,
         elevation: 0.0,
         color,
+        top_color: None,
         options: Vec::new(),
         active_option: 0,
     }
@@ -297,6 +298,120 @@ pub const PRESETS: &[Preset] = &[
                 1.5,
                 0.4,
                 0.8,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 2×2",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 2×2",
+                FurnitureKind::CubeShelf {
+                    columns: 2,
+                    rows: 2,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                0.77,
+                0.39,
+                0.77,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 2×4",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 2×4",
+                FurnitureKind::CubeShelf {
+                    columns: 2,
+                    rows: 4,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                0.77,
+                0.39,
+                1.47,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 4×4",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 4×4",
+                FurnitureKind::CubeShelf {
+                    columns: 4,
+                    rows: 4,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                1.47,
+                0.39,
+                1.47,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 1×4",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 1×4",
+                FurnitureKind::CubeShelf {
+                    columns: 1,
+                    rows: 4,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                0.42,
+                0.39,
+                1.47,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 4×1",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 4×1",
+                FurnitureKind::CubeShelf {
+                    columns: 4,
+                    rows: 1,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                1.47,
+                0.39,
+                0.42,
+                WHITE,
+            )
+        },
+    },
+    Preset {
+        label: "Cube shelf 4×2",
+        category: Category::Storage,
+        build: || {
+            make(
+                "Cube shelf 4×2",
+                FurnitureKind::CubeShelf {
+                    columns: 4,
+                    rows: 2,
+                    column_widths: Vec::new(),
+                    row_heights: Vec::new(),
+                },
+                1.47,
+                0.39,
+                0.77,
                 WHITE,
             )
         },

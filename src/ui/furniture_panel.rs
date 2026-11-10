@@ -1,7 +1,6 @@
 use crate::{
-    app::RoomPlannerApp,
-    app::WALL_HEIGHT,
-    furniture::{Category, PRESETS},
+    app::{same_type, RoomPlannerApp},
+    furniture::{Category, CubeLayout, PRESETS},
     geometry::openings::{OpeningPreset, OPENING_PRESETS},
     models::{FloorFinish, Furniture, FurnitureKind, LampStyle, Opening, OpeningKind, ShadeShape},
     ui::{
@@ -11,37 +10,72 @@ use crate::{
 };
 use eframe::egui::{self, Button, RichText};
 
+/// Tabs of the left panel.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LeftTab {
+    Add,
+    Home,
+}
+
+/// Which part of the library is showing.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LibrarySection {
+    Openings,
+    Mine,
+    Category(Category),
+    Import,
+}
+
 pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
     egui::Panel::left("furniture_panel")
         .resizable(true)
-        .default_size((ui.available_width() * 0.22).clamp(210.0, 280.0))
+        .default_size((ui.available_width() * 0.22).clamp(220.0, 290.0))
         .size_range(190.0..=420.0)
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(6.0);
-                if app.selected_opening_mut().is_some() {
-                    opening_card(app, ui);
-                    ui.add_space(8.0);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                for (tab, label) in [(LeftTab::Add, "＋ Add"), (LeftTab::Home, "🏠 Home")] {
+                    let selected = app.left_tab == tab;
+                    let text = if selected {
+                        RichText::new(label).strong().color(ACCENT)
+                    } else {
+                        RichText::new(label)
+                    };
+                    if ui
+                        .add_sized([width, 28.0], egui::Button::selectable(selected, text))
+                        .clicked()
+                    {
+                        app.left_tab = tab;
+                    }
                 }
-                if let Some(idx) = app.selected_furniture.filter(|&i| i < app.furniture.len()) {
-                    properties_card(app, ui, idx);
-                    ui.add_space(8.0);
-                }
-                library(app, ui);
-                ui.add_space(8.0);
-                finishes(app, ui);
-                ui.add_space(8.0);
-                plan_contents(app, ui);
             });
+            ui.add_space(4.0);
+            match app.left_tab {
+                LeftTab::Add => library(app, ui),
+                LeftTab::Home => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        finishes(app, ui);
+                        ui.add_space(8.0);
+                        plan_contents(app, ui);
+                    });
+                }
+            }
         });
 }
 
-fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
         .fill(egui::Color32::WHITE)
         .stroke(egui::Stroke::new(1.0, crate::ui::theme::BORDER))
         .corner_radius(8)
         .inner_margin(10)
+        .shadow(egui::Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(30),
+        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add_contents(ui)
@@ -52,77 +86,135 @@ fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> 
 // --- Library ---
 
 fn library(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
-    ui.heading("Add furniture");
     ui.add(
         egui::TextEdit::singleline(&mut app.library_filter)
-            .hint_text("🔍 Search…")
+            .hint_text("🔍 Search everything…")
             .desired_width(f32::INFINITY),
     );
     let filter = app.library_filter.trim().to_lowercase();
-    let mut to_add: Option<Furniture> = None;
+    let searching = !filter.is_empty();
 
-    if !app.my_library.is_empty() {
-        let items: Vec<(Furniture, String)> = app
-            .my_library
-            .iter()
-            .filter(|item| filter.is_empty() || item.name.to_lowercase().contains(&filter))
-            .map(|item| (item.clone(), item.name.clone()))
-            .collect();
-        if !items.is_empty() {
-            section_label(ui, "My furniture");
-            match tile_grid(ui, &items, true) {
-                Some(TileAction::Add(item)) => to_add = Some(item),
-                Some(TileAction::Remove(name)) => app.my_library.retain(|i| i.name != name),
-                None => {}
+    // One section at a time instead of one long list; searching looks through all of them.
+    if !searching {
+        if app.library_section == LibrarySection::Mine && app.my_library.is_empty() {
+            app.library_section = LibrarySection::Openings;
+        }
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            let mut chip = |ui: &mut egui::Ui, section: LibrarySection, label: &str| {
+                if ui
+                    .selectable_label(app.library_section == section, label)
+                    .clicked()
+                {
+                    app.library_section = section;
+                }
+            };
+            chip(ui, LibrarySection::Openings, "🚪 Doors & windows");
+            if !app.my_library.is_empty() {
+                chip(ui, LibrarySection::Mine, "☆ Mine");
+            }
+            for category in Category::ALL {
+                chip(ui, LibrarySection::Category(category), category.label());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            chip(ui, LibrarySection::Import, "📦 Import");
+        });
+        ui.separator();
+    }
+    let section = app.library_section;
+    let show = |s: LibrarySection| searching || section == s;
+    let mut to_add: Option<Furniture> = None;
+    let mut remove = None;
+    let mut place_opening = None;
+    let mut import = false;
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        if show(LibrarySection::Mine) && !app.my_library.is_empty() {
+            let items: Vec<(Furniture, String)> = app
+                .my_library
+                .iter()
+                .filter(|item| filter.is_empty() || item.name.to_lowercase().contains(&filter))
+                .map(|item| (item.clone(), item.name.clone()))
+                .collect();
+            if !items.is_empty() {
+                section_label(ui, "My furniture");
+                match tile_grid(ui, &items, true) {
+                    Some(TileAction::Add(item)) => to_add = Some(item),
+                    Some(TileAction::Remove(name)) => remove = Some(name),
+                    None => {}
+                }
             }
         }
-    }
 
-    let openings: Vec<&OpeningPreset> = OPENING_PRESETS
-        .iter()
-        .filter(|p| filter.is_empty() || p.label.to_lowercase().contains(&filter))
-        .collect();
-    if !openings.is_empty() {
-        section_label(ui, "Doors & windows");
-        if let Some(template) = opening_grid(ui, &openings) {
-            app.start_placing_opening(template);
+        if show(LibrarySection::Openings) {
+            let openings: Vec<&OpeningPreset> = OPENING_PRESETS
+                .iter()
+                .filter(|p| filter.is_empty() || p.label.to_lowercase().contains(&filter))
+                .collect();
+            if !openings.is_empty() {
+                section_label(ui, "Doors & windows");
+                if let Some(template) = opening_grid(ui, &openings) {
+                    place_opening = Some(template);
+                }
+                if !searching {
+                    ui.label(
+                        RichText::new(
+                            "Click one, then a wall · or drag it onto a wall. \
+                             Exact sizes can be typed in its properties.",
+                        )
+                        .small()
+                        .color(TEXT_MUTED),
+                    );
+                }
+            }
         }
-    }
 
-    for category in Category::ALL {
-        let items: Vec<(Furniture, String)> = PRESETS
-            .iter()
-            .filter(|p| p.category == category)
-            .filter(|p| filter.is_empty() || p.label.to_lowercase().contains(&filter))
-            .map(|p| ((p.build)(), p.label.to_owned()))
-            .collect();
-        if items.is_empty() {
-            continue;
+        for category in Category::ALL {
+            if !show(LibrarySection::Category(category)) {
+                continue;
+            }
+            let items: Vec<(Furniture, String)> = PRESETS
+                .iter()
+                .filter(|p| p.category == category)
+                .filter(|p| filter.is_empty() || p.label.to_lowercase().contains(&filter))
+                .map(|p| ((p.build)(), p.label.to_owned()))
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            section_label(ui, category.label());
+            if let Some(TileAction::Add(item)) = tile_grid(ui, &items, false) {
+                to_add = Some(item);
+            }
         }
-        section_label(ui, category.label());
-        if let Some(TileAction::Add(item)) = tile_grid(ui, &items, false) {
-            to_add = Some(item);
-        }
-    }
 
+        if show(LibrarySection::Import) && !searching {
+            section_label(ui, "Your own models");
+            import = ui
+                .add(
+                    Button::new("Import 3D model (.glb / .gltf)…")
+                        .min_size(egui::vec2(ui.available_width(), 26.0)),
+                )
+                .on_hover_text("For example a model downloaded from a furniture store")
+                .clicked();
+        }
+        if let Some(err) = &app.model_error {
+            ui.colored_label(egui::Color32::from_rgb(200, 40, 40), err);
+        }
+    });
+
+    if let Some(name) = remove {
+        app.my_library.retain(|i| i.name != name);
+    }
+    if let Some(template) = place_opening {
+        app.start_placing_opening(template);
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        section_label(ui, "Your own models");
-        if ui
-            .add(
-                Button::new("Import 3D model (.glb / .gltf)…")
-                    .min_size(egui::vec2(ui.available_width(), 26.0)),
-            )
-            .on_hover_text("For example a model downloaded from a furniture store")
-            .clicked()
-        {
-            import_model(app);
-        }
+    if import {
+        import_model(app);
     }
-    if let Some(err) = &app.model_error {
-        ui.colored_label(egui::Color32::from_rgb(200, 40, 40), err);
-    }
-
+    let _ = import;
     if let Some(item) = to_add {
         app.add_furniture(item);
     }
@@ -328,70 +420,82 @@ fn tile(ui: &mut egui::Ui, item: &Furniture, label: &str, size: egui::Vec2) -> e
 
 /// Wall paint and flooring of the home.
 fn finishes(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new(RichText::new("Walls & floor").strong())
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new("finishes")
-                .num_columns(2)
-                .spacing([10.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Wall color");
-                    ui.horizontal(|ui| {
-                        ui.color_edit_button_srgb(&mut app.finishes.wall_color);
-                        for (name, color) in [
-                            ("White", [246, 246, 244]),
-                            ("Off-white", [240, 236, 226]),
-                            ("Light gray", [222, 223, 222]),
-                        ] {
-                            if ui.small_button(name).clicked() {
-                                app.finishes.wall_color = color;
-                            }
+    section_label(ui, "Walls & floor");
+    {
+        egui::Grid::new("finishes")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Wall color");
+                ui.horizontal(|ui| {
+                    ui.color_edit_button_srgb(&mut app.finishes.wall_color);
+                    for (name, color) in [
+                        ("White", [246, 246, 244]),
+                        ("Off-white", [240, 236, 226]),
+                        ("Light gray", [222, 223, 222]),
+                    ] {
+                        if ui.small_button(name).clicked() {
+                            app.finishes.wall_color = color;
                         }
-                    });
-                    ui.end_row();
-                    ui.label("Floor");
-                    ui.horizontal(|ui| {
-                        let [r, g, b] = app.finishes.floor.color();
-                        let (swatch, _) =
-                            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-                        ui.painter()
-                            .rect_filled(swatch, 4.0, egui::Color32::from_rgb(r, g, b));
-                        egui::ComboBox::from_id_salt("floor_finish")
-                            .selected_text(app.finishes.floor.label())
-                            .show_ui(ui, |ui| {
-                                for finish in FloorFinish::ALL {
-                                    ui.selectable_value(
-                                        &mut app.finishes.floor,
-                                        finish,
-                                        finish.label(),
-                                    );
-                                }
-                            });
-                    });
-                    ui.end_row();
+                    }
                 });
-        });
+                ui.end_row();
+                ui.label("Floor");
+                ui.horizontal(|ui| {
+                    let [r, g, b] = app.finishes.floor.color();
+                    let (swatch, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(swatch, 4.0, egui::Color32::from_rgb(r, g, b));
+                    egui::ComboBox::from_id_salt("floor_finish")
+                        .selected_text(app.finishes.floor.label())
+                        .show_ui(ui, |ui| {
+                            for finish in FloorFinish::ALL {
+                                ui.selectable_value(
+                                    &mut app.finishes.floor,
+                                    finish,
+                                    finish.label(),
+                                );
+                            }
+                        });
+                });
+                ui.end_row();
+            });
+    }
 }
 
 fn plan_contents(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
     if app.furniture.is_empty() {
         return;
     }
-    egui::CollapsingHeader::new(format!("In this plan ({})", app.furniture.len()))
-        .default_open(false)
-        .show(ui, |ui| {
-            for (idx, item) in app.furniture.iter().enumerate() {
-                let selected = app.selected_furniture == Some(idx);
-                let mut label = format!("{}  {}", item.name, size_text(item));
-                if item.options.len() > 1 {
-                    label += &format!("  · {} options", item.options.len());
-                }
-                if ui.selectable_label(selected, label).clicked() {
-                    app.selected_furniture = Some(idx);
-                    app.selected_walls.clear();
-                }
+    section_label(
+        ui,
+        &format!("Furniture in this plan ({})", app.furniture.len()),
+    );
+    {
+        let mut clicked = None;
+        for (idx, item) in app.furniture.iter().enumerate() {
+            let selected = app.is_furniture_selected(idx);
+            let mut label = format!("{}  {}", item.name, size_text(item));
+            if item.options.len() > 1 {
+                label += &format!("  · {} options", item.options.len());
             }
-        });
+            let response = ui
+                .selectable_label(selected, label)
+                .on_hover_text("Shift+click to select several");
+            if response.clicked() {
+                clicked = Some((idx, ui.input(|i| i.modifiers.shift)));
+            }
+        }
+        if let Some((idx, shift)) = clicked {
+            if shift {
+                app.toggle_furniture(idx);
+            } else {
+                app.select_furniture(Some(idx));
+            }
+            app.selected_walls.clear();
+        }
+    }
 }
 
 fn size_text(item: &Furniture) -> String {
@@ -400,10 +504,19 @@ fn size_text(item: &Furniture) -> String {
 
 // --- Properties ---
 
-fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
+pub fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
     let mut duplicate = false;
     let mut delete = false;
     let mut save_to_library = false;
+    let mut deselect = false;
+    let mut select_similar = false;
+    let before = app.furniture[idx].clone();
+    let extra = app.extra_furniture.len();
+    let similar = app
+        .furniture
+        .iter()
+        .filter(|other| same_type(other, &before))
+        .count();
 
     card(ui, |ui| {
         let item = &mut app.furniture[idx];
@@ -415,13 +528,25 @@ fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
                     .desired_width(ui.available_width() - 34.0)
                     .font(egui::TextStyle::Heading),
             );
-            if ui.button("×").on_hover_text("Deselect").clicked() {
-                app.selected_furniture = None;
-            }
+            deselect = ui.button("×").on_hover_text("Deselect").clicked();
         });
-        if app.selected_furniture.is_none() {
+        if deselect {
             return;
         }
+        ui.horizontal_wrapped(|ui| {
+            if extra > 0 {
+                ui.label(
+                    RichText::new(format!("+{extra} more selected · changes apply to all"))
+                        .color(ACCENT),
+                );
+            }
+            if similar > extra + 1 {
+                select_similar = ui
+                    .small_button(format!("Select all {similar}"))
+                    .on_hover_text("Select every piece with this name and type")
+                    .clicked();
+            }
+        });
 
         options_row(ui, item);
         ui.add_space(2.0);
@@ -505,6 +630,26 @@ fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
                     ui.end_row();
                 }
 
+                if matches!(item.kind, FurnitureKind::Box) {
+                    ui.label("Top color");
+                    ui.horizontal(|ui| {
+                        let mut separate = item.top_color.is_some();
+                        if ui
+                            .checkbox(&mut separate, "")
+                            .on_hover_text("Give the top its own color, like a countertop")
+                            .changed()
+                        {
+                            item.top_color = separate.then_some(item.color);
+                        }
+                        if let Some(top) = &mut item.top_color {
+                            ui.color_edit_button_srgb(top);
+                        } else {
+                            ui.label(RichText::new("Same as sides").small().color(TEXT_MUTED));
+                        }
+                    });
+                    ui.end_row();
+                }
+
                 kind_params(ui, item);
             });
 
@@ -531,6 +676,13 @@ fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
         });
     });
 
+    copy_edits_to_selection(app, idx, &before);
+    if deselect {
+        app.select_furniture(None);
+    }
+    if select_similar {
+        app.select_similar_furniture();
+    }
     if duplicate {
         app.duplicate_selected_furniture();
     }
@@ -539,6 +691,50 @@ fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) {
     }
     if delete {
         app.delete_selected_furniture();
+    }
+}
+
+/// Copies whatever was just changed on the piece in the panel to the rest of the selection.
+/// Name and type-specific settings only go to pieces of the same type.
+fn copy_edits_to_selection(app: &mut RoomPlannerApp, idx: usize, before: &Furniture) {
+    let after = app.furniture[idx].clone();
+    if after == *before {
+        return;
+    }
+    let same_kind =
+        |f: &Furniture| std::mem::discriminant(&f.kind) == std::mem::discriminant(&before.kind);
+    for other in app.extra_furniture.clone() {
+        let Some(item) = app.furniture.get_mut(other) else {
+            continue;
+        };
+        if after.width != before.width {
+            item.width = after.width;
+        }
+        if after.depth != before.depth {
+            item.depth = after.depth;
+        }
+        if after.height != before.height {
+            item.height = after.height;
+        }
+        if after.elevation != before.elevation {
+            item.elevation = after.elevation;
+        }
+        if after.color != before.color {
+            item.color = after.color;
+        }
+        if after.top_color != before.top_color && same_kind(item) {
+            item.top_color = after.top_color;
+        }
+        if after.rotation != before.rotation {
+            item.rotation = (item.rotation + after.rotation - before.rotation)
+                .rem_euclid(std::f32::consts::TAU);
+        }
+        if after.name != before.name && same_type(item, before) {
+            item.name = after.name.clone();
+        }
+        if after.kind != before.kind && same_kind(item) {
+            item.kind = after.kind.clone();
+        }
     }
 }
 
@@ -582,12 +778,22 @@ fn options_row(ui: &mut egui::Ui, item: &mut Furniture) {
     });
 }
 
-fn opening_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
+/// A "×" at the right end of a card's title row; true when clicked.
+pub fn close_button(ui: &mut egui::Ui) -> bool {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.button("×").on_hover_text("Deselect [Esc]").clicked()
+    })
+    .inner
+}
+
+pub fn opening_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
     let Some((wi, _)) = app.selected_opening else {
         return;
     };
     let wall_length = app.walls[wi].length();
+    let wall_height = app.walls[wi].height;
     let mut delete = false;
+    let mut deselect = false;
     card(ui, |ui| {
         let Some(opening) = app.selected_opening_mut() else {
             return;
@@ -596,6 +802,7 @@ fn opening_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             let (picture, _) = ui.allocate_exact_size(egui::vec2(44.0, 36.0), egui::Sense::hover());
             thumbnail::paint_opening(ui.painter(), picture, opening);
             ui.heading(opening.kind.label());
+            deselect = close_button(ui);
         });
         ui.add_space(2.0);
         egui::Grid::new("opening_props")
@@ -653,16 +860,18 @@ fn opening_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             });
         let max_width = wall_length.max(0.1);
         opening.width = opening.width.clamp(0.2, max_width);
-        opening.height = opening.height.clamp(0.2, WALL_HEIGHT);
+        opening.height = opening.height.clamp(0.2, wall_height.max(0.2));
         opening.sill = opening
             .sill
-            .clamp(0.0, (WALL_HEIGHT - opening.height).max(0.0));
+            .clamp(0.0, (wall_height - opening.height).max(0.0));
         opening.offset = opening.clamped_offset(wall_length);
         ui.add_space(6.0);
         delete = ui.button("🗑 Delete").on_hover_text("[Del]").clicked();
     });
     if delete {
         app.delete_selection();
+    } else if deselect {
+        app.clear_selection();
     }
 }
 
@@ -672,7 +881,7 @@ pub fn rotate(item: &mut Furniture, degrees: f32) {
 }
 
 /// Edits a length stored in meters as centimeters.
-fn cm_value(ui: &mut egui::Ui, meters: &mut f32) -> egui::Response {
+pub fn cm_value(ui: &mut egui::Ui, meters: &mut f32) -> egui::Response {
     let mut cm = *meters * 100.0;
     let response = ui.add(
         egui::DragValue::new(&mut cm)
@@ -754,6 +963,7 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
             ui.add(egui::DragValue::new(shelves).range(2..=30));
             ui.end_row();
         }
+        FurnitureKind::CubeShelf { .. } => cube_shelf_params(ui, item),
         FurnitureKind::Lamp {
             style,
             shade,
@@ -839,6 +1049,136 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
     if let Some(elevation) = new_elevation {
         item.elevation = elevation;
     }
+}
+
+/// Column and row counts plus one box size used for every compartment: changing it, or the
+/// counts, grows or shrinks the whole shelf. Sizes per column and row are there for the
+/// rare shelf that needs them.
+fn cube_shelf_params(ui: &mut egui::Ui, item: &mut Furniture) {
+    let Some(layout) = CubeLayout::of(item) else {
+        return;
+    };
+    let FurnitureKind::CubeShelf {
+        columns,
+        rows,
+        column_widths,
+        row_heights,
+    } = &mut item.kind
+    else {
+        return;
+    };
+    let custom = !column_widths.is_empty() || !row_heights.is_empty();
+    // Outer size of a shelf with these inner sizes.
+    let outer = |cells: &[f32]| {
+        cells.iter().sum::<f32>()
+            + 2.0 * layout.frame
+            + layout.divider * cells.len().saturating_sub(1) as f32
+    };
+
+    ui.label("Columns");
+    let (old_columns, old_rows) = (*columns, *rows);
+    ui.add(egui::DragValue::new(columns).range(1..=10));
+    ui.end_row();
+    ui.label("Rows");
+    ui.add(egui::DragValue::new(rows).range(1..=10));
+    ui.end_row();
+    if (*columns, *rows) != (old_columns, old_rows) {
+        // The boxes keep their size and the shelf grows; new ones copy the last.
+        let mut widths = layout.columns.clone();
+        let mut heights = layout.rows.clone();
+        widths.resize(*columns as usize, widths.last().copied().unwrap_or(0.3));
+        heights.resize(*rows as usize, heights.last().copied().unwrap_or(0.3));
+        item.width = outer(&widths).max(0.05);
+        item.height = outer(&heights).max(0.05);
+        if custom {
+            *column_widths = widths;
+            *row_heights = heights;
+        }
+        return;
+    }
+
+    if !custom {
+        // All boxes alike: one size for the lot.
+        let mut box_width = layout.columns[0];
+        let mut box_height = layout.rows[0];
+        ui.label("Box width")
+            .on_hover_text("Inside width of every box");
+        let width_changed = cm_value(ui, &mut box_width).changed();
+        ui.end_row();
+        ui.label("Box height")
+            .on_hover_text("Inside height of every box");
+        let height_changed = cm_value(ui, &mut box_height).changed();
+        ui.end_row();
+        if width_changed {
+            item.width = outer(&vec![box_width.max(0.01); layout.columns.len()]);
+        }
+        if height_changed {
+            item.height = outer(&vec![box_height.max(0.01); layout.rows.len()]);
+        }
+    } else {
+        let mut width_delta = 0.0;
+        let mut height_delta = 0.0;
+        ui.label("Column widths");
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut sizes = layout.columns.clone();
+                for i in 0..sizes.len() {
+                    if cm_value(ui, &mut sizes[i])
+                        .on_hover_text(format!("Inside width of column {}", i + 1))
+                        .changed()
+                    {
+                        width_delta = sizes[i] - layout.columns[i];
+                        *column_widths = sizes.clone();
+                        *row_heights = layout.rows.clone();
+                    }
+                }
+            });
+        });
+        ui.end_row();
+
+        ui.label("Row heights");
+        ui.vertical(|ui| {
+            // Listed top to bottom, like the shelf itself.
+            let mut sizes = layout.rows.clone();
+            for j in (0..sizes.len()).rev() {
+                let label = match j {
+                    _ if sizes.len() == 1 => "",
+                    0 => " (bottom)",
+                    _ if j == sizes.len() - 1 => " (top)",
+                    _ => "",
+                };
+                if cm_value(ui, &mut sizes[j])
+                    .on_hover_text(format!("Inside height of row {}{label}", j + 1))
+                    .changed()
+                {
+                    height_delta = sizes[j] - layout.rows[j];
+                    *row_heights = sizes.clone();
+                    *column_widths = layout.columns.clone();
+                }
+            }
+        });
+        ui.end_row();
+        item.width = (item.width + width_delta).max(0.05);
+        item.height = (item.height + height_delta).max(0.05);
+    }
+
+    ui.label("");
+    let mut different = custom;
+    if ui
+        .checkbox(&mut different, "Different sizes")
+        .on_hover_text("Set the size of each column and row separately")
+        .changed()
+    {
+        if different {
+            *column_widths = layout.columns.clone();
+            *row_heights = layout.rows.clone();
+        } else {
+            // Back to equal boxes, spread over the current size.
+            column_widths.clear();
+            row_heights.clear();
+        }
+    }
+    ui.end_row();
 }
 
 fn style_label(style: LampStyle) -> &'static str {

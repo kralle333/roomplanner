@@ -1,43 +1,60 @@
 use crate::app::RoomPlannerApp;
+use crate::models::AppSaveState;
 use std::path::PathBuf;
 
+/// The plan as it would be written to a file.
+pub fn current_state(app: &RoomPlannerApp) -> AppSaveState {
+    AppSaveState {
+        walls: app.walls.clone(),
+        furniture: app.furniture.clone(),
+        finishes: app.finishes,
+        pan_offset: app.pan_offset,
+        zoom_factor: app.zoom_factor,
+    }
+}
+
+/// Replaces the plan with `state`, leaving file and undo bookkeeping to the caller.
+pub fn apply_state(app: &mut RoomPlannerApp, state: AppSaveState) {
+    app.set_walls(state.walls);
+    app.furniture = state.furniture;
+    app.finishes = state.finishes;
+    app.clear_selection();
+    app.wall_start_point = None;
+    app.pan_offset = state.pan_offset;
+    app.zoom_factor = state.zoom_factor;
+    if !app.walls.is_empty() {
+        app.current_tool = crate::models::Tool::Select;
+    }
+    app.pending_fit = true;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-use crate::models::AppSaveState;
+pub fn read_state(path: &PathBuf) -> Option<AppSaveState> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn read_state(_path: &PathBuf) -> Option<AppSaveState> {
+    None
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub const CONFIG_FILE: &str = ".roomplanner.json";
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_from_path(app: &mut RoomPlannerApp, path: &PathBuf) {
-    if let Ok(data) = std::fs::read_to_string(path) {
-        if let Ok(state) = serde_json::from_str::<AppSaveState>(&data) {
-            app.set_walls(state.walls);
-            app.furniture = state.furniture;
-            app.finishes = state.finishes;
-            app.clear_selection();
-            app.wall_start_point = None;
-            app.pan_offset = state.pan_offset;
-            app.zoom_factor = state.zoom_factor;
-            app.current_file = Some(path.clone());
-            if !app.walls.is_empty() {
-                app.current_tool = crate::models::Tool::Select;
-            }
-            app.mark_saved(true);
-            app.pending_fit = true;
-            remember_last_file(path);
-        }
+    if let Some(state) = read_state(path) {
+        apply_state(app, state);
+        app.current_file = Some(path.clone());
+        app.mark_saved(true);
+        remember_last_file(path);
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_to_path(app: &mut RoomPlannerApp, path: &PathBuf) {
-    let state = AppSaveState {
-        walls: app.walls.clone(),
-        furniture: app.furniture.clone(),
-        finishes: app.finishes,
-        pan_offset: app.pan_offset,
-        zoom_factor: app.zoom_factor,
-    };
+    let state = current_state(app);
     if let Ok(data) = serde_json::to_string_pretty(&state) {
         if std::fs::write(path, data).is_ok() {
             app.current_file = Some(path.clone());

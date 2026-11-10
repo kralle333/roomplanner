@@ -1,5 +1,5 @@
 use crate::{
-    app::{CameraMode, RoomPlannerApp},
+    app::{same_type, CameraMode, RoomPlannerApp, TimeOfDay, PIXELS_PER_METER},
     furniture::{furniture_at, Category, PRESETS},
     geometry::{
         openings::{opening_at, place_on_wall},
@@ -7,12 +7,13 @@ use crate::{
     },
     models::{Opening, Tool},
     tools::{
-        draw::{draw_drop_preview, draw_grid, draw_scene, draw_viewer},
+        draw::{draw_drop_preview, draw_scale_bar, draw_scene},
         input::handle_input,
     },
     ui::{
         furniture_panel::{rotate, LibraryDrop, OpeningDrop},
         theme::CANVAS_BG,
+        view3d,
     },
 };
 use eframe::egui;
@@ -27,67 +28,72 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
         .show_inside(ui, |ui| {
             let (response, painter) =
                 ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
-            app.canvas_rect = response.rect;
+            let rect = response.rect;
+            app.canvas_rect = rect;
+            view3d::update_projection(app, rect);
             // Wait for the first few frames: panel sizes settle after the first layout pass.
             if app.pending_fit && ui.ctx().cumulative_pass_nr() > 3 {
                 app.pending_fit = false;
                 app.zoom_to_fit();
-                crate::ui::view3d::fit_orbit(app);
+                view3d::fit_orbit(app);
             }
 
-            // Pinch or Ctrl+scroll zooms; two-finger scroll / the wheel pans
-            // (or zooms, if the user prefers that in the View menu).
-            if response.contains_pointer() {
-                let (mut zoom, scroll) =
-                    ui.ctx().input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
-                if app.scroll_zooms {
-                    zoom *= 1.0 + scroll.y * 0.002;
-                } else {
-                    app.pan_offset += scroll;
-                }
-                if zoom != 1.0 {
-                    if let Some(mouse_pos) = response.hover_pos() {
-                        app.zoom_at(mouse_pos, zoom);
-                    }
-                }
-            }
+            let navigating = view3d::handle_camera_input(app, ui, &response);
+            view3d::update_projection(app, rect);
+            let walk = app.camera_mode == CameraMode::Walk;
 
-            let typing = ui.ctx().egui_wants_keyboard_input();
-            let is_panning = ui.ctx().input(|i| {
-                i.pointer.button_down(egui::PointerButton::Middle)
-                    || i.pointer.button_down(egui::PointerButton::Secondary)
-                    || (!typing && i.key_down(egui::Key::Space))
-            });
-            if is_panning && response.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            }
+            // Pick and snap distances are given in pixels; convert them at the pointer.
+            let center = app.screen_to_world(rect.center());
+            app.view_scale = if app.camera_mode == CameraMode::Top {
+                app.zoom_factor
+            } else {
+                let anchor = response
+                    .hover_pos()
+                    .map(|p| app.screen_to_world(p))
+                    .unwrap_or(center);
+                let a = app.world_to_screen(anchor);
+                let x = app.world_to_screen(anchor + egui::vec2(PIXELS_PER_METER, 0.0));
+                let z = app.world_to_screen(anchor + egui::vec2(0.0, PIXELS_PER_METER));
+                ((a.distance(x) * a.distance(z)).sqrt() / PIXELS_PER_METER).clamp(0.05, 50.0)
+            };
+            app.visible_world_rect =
+                egui::Rect::from_center_size(center, rect.size() / app.view_scale.max(0.05));
 
-            if is_panning && response.dragged() {
-                app.pan_offset += response.drag_delta();
-            }
-
-            app.visible_world_rect = egui::Rect::from_min_max(
-                app.screen_to_world(response.rect.min),
-                app.screen_to_world(response.rect.max),
-            );
-
-            let pointer = response.hover_pos().map(|p| app.screen_to_world(p));
-            app.pointer_world = pointer;
+            let floor_pointer = response.hover_pos().map(|p| app.screen_to_world(p));
+            app.pointer_world = floor_pointer;
+            // What's under the pointer in 3D: a wall or piece, or the floor. Walls are drawn
+            // on the floor, so that tool uses the floor point.
+            let pointer = if walk || navigating {
+                None
+            } else if app.current_tool == Tool::DrawWall {
+                floor_pointer
+            } else {
+                response.hover_pos().map(|p| app.pick(p))
+            };
             let interact_pointer = response
                 .interact_pointer_pos()
                 .map(|p| app.screen_to_world(p));
 
+            // In 3D a piece in front of a wall is what you point at, not the wall behind it.
+            let in_front = response
+                .hover_pos()
+                .filter(|_| pointer.is_some() && app.current_tool == Tool::Select)
+                .and_then(|p| app.pick_furniture(p));
+
             let hovered_endpoints = pointer
-                .map(|p| get_hovered_endpoints(&app.walls, p, app.zoom_factor))
+                .filter(|_| in_front.is_none())
+                .map(|p| get_hovered_endpoints(&app.walls, p, app.scale()))
                 .unwrap_or_default();
 
-            let hovered_wall_idx = if hovered_endpoints.is_empty() {
-                pointer.and_then(|p| find_closest_wall(&app.walls, p, app.zoom_factor))
+            let hovered_wall_idx = if hovered_endpoints.is_empty() && in_front.is_none() {
+                pointer.and_then(|p| find_closest_wall(&app.walls, p, app.scale()))
             } else {
                 None
             };
 
-            let hovered_furniture = if hovered_endpoints.is_empty() && hovered_wall_idx.is_none() {
+            let hovered_furniture = if in_front.is_some() {
+                in_front
+            } else if hovered_endpoints.is_empty() && hovered_wall_idx.is_none() {
                 pointer.and_then(|p| furniture_at(&app.furniture, p))
             } else {
                 None
@@ -107,7 +113,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                     let pos = ui.ctx().pointer_latest_pos()?;
                     let mut item = drop.0.clone();
                     item.position = app.screen_to_world(pos);
-                    let snap = snap_furniture(&item, &app.walls, app.zoom_factor);
+                    let snap = snap_furniture(&item, &app.walls, app.scale());
                     item.position = snap.position;
                     item.rotation = snap.rotation;
                     Some(item)
@@ -125,9 +131,8 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             if response.contains_pointer() {
                 if let Some(drop) = egui::DragAndDrop::payload::<OpeningDrop>(ui.ctx()) {
                     app.opening_preview = ui.ctx().pointer_latest_pos().and_then(|pos| {
-                        let world = app.screen_to_world(pos);
-                        let (wi, offset) =
-                            place_on_wall(&app.walls, world, app.zoom_factor, &drop.0)?;
+                        let world = app.pick(pos);
+                        let (wi, offset) = place_on_wall(&app.walls, world, app.scale(), &drop.0)?;
                         Some((wi, Opening { offset, ..drop.0 }))
                     });
                     if response.dnd_release_payload::<OpeningDrop>().is_some() {
@@ -142,23 +147,27 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
 
             if response.secondary_clicked() {
                 app.selected_opening = None;
-                app.context_menu_pos = pointer;
+                app.context_menu_pos = pointer.or(floor_pointer);
                 app.wall_start_point = None;
-                let opening = pointer.and_then(|p| opening_at(&app.walls, p, app.zoom_factor));
+                let opening = pointer
+                    .filter(|_| in_front.is_none())
+                    .and_then(|p| opening_at(&app.walls, p, app.scale()));
                 if let Some(opening) = opening {
                     app.clear_selection();
                     app.selected_opening = Some(opening);
                 } else if let Some(idx) = hovered_furniture {
-                    app.selected_furniture = Some(idx);
+                    if !app.is_furniture_selected(idx) {
+                        app.select_furniture(Some(idx));
+                    }
                     app.selected_walls.clear();
                 } else if let Some(idx) = hovered_wall_idx {
-                    app.selected_furniture = None;
+                    app.select_furniture(None);
                     if !app.selected_walls.contains(&idx) {
                         app.selected_walls.clear();
                         app.selected_walls.insert(idx);
                     }
                 } else {
-                    app.selected_furniture = None;
+                    app.select_furniture(None);
                     app.selected_walls.clear();
                 }
             }
@@ -167,7 +176,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             let mut snapped_preview = None;
             let mut snapped_wall_idx = None;
 
-            if !is_panning {
+            if !navigating && !walk {
                 let (alignments, preview, wall_idx) =
                     handle_input(app, ui, &response, pointer, interact_pointer);
                 active_alignments = alignments;
@@ -175,34 +184,92 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                 snapped_wall_idx = wall_idx;
             }
 
-            if app.show_grid {
-                draw_grid(app, &painter, response.rect);
+            let hovered_wall = hovered_wall_idx.filter(|_| app.current_tool == Tool::Select);
+            view3d::paint(app, &painter, rect, library_drop.as_ref(), hovered_wall);
+            if !walk {
+                draw_scene(
+                    app,
+                    &painter,
+                    pointer,
+                    &hovered_endpoints,
+                    hovered_wall_idx,
+                    &active_alignments,
+                    snapped_preview,
+                    snapped_wall_idx,
+                    hovered_furniture,
+                );
+                if let Some(item) = &library_drop {
+                    draw_drop_preview(app, &painter, item);
+                }
             }
-            draw_scene(
-                app,
-                &painter,
-                pointer,
-                &hovered_endpoints,
-                hovered_wall_idx,
-                &active_alignments,
-                snapped_preview,
-                snapped_wall_idx,
-                hovered_furniture,
-            );
-            if app.camera_mode == CameraMode::Walk {
-                draw_viewer(app, &painter);
-            }
-            if let Some(item) = &library_drop {
-                draw_drop_preview(app, &painter, item);
+            if app.camera_mode == CameraMode::Top && app.show_grid {
+                draw_scale_bar(app, &painter, rect);
             }
 
             if app.walls.is_empty() && app.furniture.is_empty() && app.wall_start_point.is_none() {
-                empty_state(&painter, response.rect);
+                empty_state(&painter, rect);
             }
 
-            zoom_controls(app, ui, response.rect);
+            view_toolbar(app, ui, rect);
+            crate::ui::properties::show(app, ui, rect);
+            if app.camera_mode == CameraMode::Top {
+                zoom_controls(app, ui, rect);
+            }
             response.context_menu(|ui| context_menu(app, ui));
         });
+}
+
+/// Camera and lighting switches floating in the top-left corner of the viewport.
+fn view_toolbar(app: &mut RoomPlannerApp, ui: &mut egui::Ui, canvas: egui::Rect) {
+    egui::Area::new(egui::Id::new("view_toolbar"))
+        .fixed_pos(canvas.left_top() + egui::vec2(12.0, 12.0))
+        .order(egui::Order::Middle)
+        .constrain_to(canvas)
+        .show(ui.ctx(), |ui| {
+            floating_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let mut mode = app.camera_mode;
+                    ui.selectable_value(&mut mode, CameraMode::Top, "▦ Top")
+                        .on_hover_text("Straight down, like a floor plan. Easiest for drawing walls [T]");
+                    ui.selectable_value(&mut mode, CameraMode::Orbit, "🧊 3D")
+                        .on_hover_text("Look around the home. Two-finger scroll or right-drag to rotate, pinch to zoom [T]");
+                    ui.selectable_value(&mut mode, CameraMode::Walk, "🚶 Walk")
+                        .on_hover_text("Stand in the room at eye height");
+                    app.set_camera_mode(mode);
+                    ui.separator();
+                    for (time, icon, tip) in [
+                        (TimeOfDay::Day, "☀", "Daylight"),
+                        (TimeOfDay::Evening, "🌆", "Evening"),
+                        (TimeOfDay::Night, "🌙", "Night: see your lamps"),
+                    ] {
+                        ui.selectable_value(&mut app.time_of_day, time, icon)
+                            .on_hover_text(tip);
+                    }
+                    if app.camera_mode == CameraMode::Orbit {
+                        ui.separator();
+                        ui.toggle_value(&mut app.cut_walls, "✂ Cut walls")
+                            .on_hover_text("Lower the walls so you can see into the rooms");
+                    }
+                    ui.separator();
+                    if ui
+                        .button("⛶")
+                        .on_hover_text("Show the whole plan · F frames what is selected")
+                        .clicked()
+                    {
+                        app.fit_whole_plan();
+                    }
+                });
+            });
+        });
+}
+
+fn floating_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 240))
+        .stroke(egui::Stroke::new(1.0, crate::ui::theme::BORDER))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(6, 4))
 }
 
 fn empty_state(painter: &egui::Painter, rect: egui::Rect) {
@@ -217,7 +284,7 @@ fn empty_state(painter: &egui::Painter, rect: egui::Rect) {
     painter.text(
         rect.center() + egui::vec2(0.0, 14.0),
         egui::Align2::CENTER_CENTER,
-        "Click to place corners · each grid square is 10 cm, bold lines every meter",
+        "Pick ✏ Walls and click to place corners · grid squares are 10 cm, bold lines every meter",
         egui::FontId::proportional(13.0),
         color,
     );
@@ -249,16 +316,36 @@ fn context_menu(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
         return;
     }
     if let Some(idx) = app.selected_furniture.filter(|&i| i < app.furniture.len()) {
-        let item = &mut app.furniture[idx];
-        ui.label(egui::RichText::new(&item.name).strong());
+        let selection = app.selected_furniture_indices();
+        let title = match selection.len() {
+            1 => app.furniture[idx].name.clone(),
+            n => format!("{} pieces", n),
+        };
+        ui.label(egui::RichText::new(title).strong());
         ui.separator();
         if ui
             .add(egui::Button::new("Rotate 90°").shortcut_text("R"))
             .clicked()
         {
-            rotate(item, 90.0);
+            for &i in &selection {
+                rotate(&mut app.furniture[i], 90.0);
+            }
             ui.close();
         }
+        let similar = app
+            .furniture
+            .iter()
+            .filter(|other| same_type(other, &app.furniture[idx]))
+            .count();
+        if similar > selection.len()
+            && ui
+                .button(format!("Select all {similar} like this"))
+                .clicked()
+        {
+            app.select_similar_furniture();
+            ui.close();
+        }
+        let item = &mut app.furniture[idx];
         if ui.add(egui::Button::new("Add option to compare")).clicked() {
             item.add_option();
             ui.close();
@@ -291,6 +378,20 @@ fn context_menu(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             app.duplicate_selected_furniture();
             ui.close();
         }
+        if ui
+            .add(egui::Button::new("Copy").shortcut_text("Ctrl+C"))
+            .clicked()
+        {
+            app.copy_selected_furniture(ui.ctx());
+            ui.close();
+        }
+        if ui
+            .add(egui::Button::new("Cut").shortcut_text("Ctrl+X"))
+            .clicked()
+        {
+            app.cut_selected_furniture(ui.ctx());
+            ui.close();
+        }
         if ui.button("Save to My furniture").clicked() {
             app.save_to_library();
             ui.close();
@@ -318,6 +419,14 @@ fn context_menu(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
     }
 
     let pos = app.context_menu_pos;
+    if !app.furniture_clipboard.is_empty()
+        && ui
+            .add(egui::Button::new("Paste here").shortcut_text("Ctrl+V"))
+            .clicked()
+    {
+        app.paste_furniture(pos, None);
+        ui.close();
+    }
     ui.menu_button("Add furniture here", |ui| {
         for category in Category::ALL {
             ui.menu_button(category.label(), |ui| {
@@ -334,20 +443,26 @@ fn context_menu(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             });
         }
     });
-    if app.camera_mode == CameraMode::Walk {
+    if app.camera_mode != CameraMode::Walk {
         if let Some(p) = pos {
-            if ui.button("Stand here in 3D").clicked() {
+            if ui.button("🚶 Stand here").clicked() {
+                app.set_camera_mode(CameraMode::Walk);
                 app.camera_pos = p;
                 ui.close();
             }
         }
     }
     ui.separator();
+    let label = if app.selection_bounds().is_some() {
+        "Zoom to selection"
+    } else {
+        "Show whole plan"
+    };
     if ui
-        .add(egui::Button::new("Zoom to fit").shortcut_text("F"))
+        .add(egui::Button::new(label).shortcut_text("F"))
         .clicked()
     {
-        app.zoom_to_fit();
+        app.fit_view();
         ui.close();
     }
 }

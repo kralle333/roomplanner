@@ -1,15 +1,16 @@
 use crate::{
-    app::{RoomPlannerApp, PIXELS_PER_METER, WALL_THICKNESS},
-    furniture::{draw_order, lamp, Shape as PartShape},
+    app::{CameraMode, RoomPlannerApp, PIXELS_PER_METER, WALL_THICKNESS},
     geometry::{
         math::{closest_point_on_segment, ray_segment_distance},
         openings::{opening_at, opening_center, wall_frame},
-        rooms::triangulate,
+        walls::{clear_length, room_interior, touching_walls, wall_face},
     },
-    models::{Furniture, FurnitureKind, LampStyle, Opening, OpeningKind, Tool, Wall},
-    tools::input::viewer_handles,
+    models::{Furniture, Opening, Tool, Wall},
+    tools::input::rotation_handle,
     ui::theme::{ACCENT, TEXT_MUTED},
 };
+use std::collections::HashSet;
+
 use eframe::egui::{self, emath::Rot2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 const WALL_COLOR: Color32 = Color32::from_rgb(55, 60, 70);
@@ -27,49 +28,14 @@ pub fn draw_scene(
     snapped_wall_idx: Option<usize>,
     hovered_furniture: Option<usize>,
 ) {
-    for room_polygon in &app.rooms {
-        // A pale version of the real floor, so furniture stays readable on top of it.
-        let [r, g, b] = app
-            .finishes
-            .floor
-            .color()
-            .map(|c| (c as f32 * 0.35 + 255.0 * 0.65) as u8);
-        let floor_color = Color32::from_rgb(r, g, b);
-        let mut mesh = egui::epaint::Mesh::default();
-        let triangles = triangulate(room_polygon);
-
-        for tri in triangles {
-            let idx = mesh.vertices.len() as u32;
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: app.world_to_screen(tri[0]),
-                uv: Pos2::ZERO,
-                color: floor_color,
-            });
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: app.world_to_screen(tri[1]),
-                uv: Pos2::ZERO,
-                color: floor_color,
-            });
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: app.world_to_screen(tri[2]),
-                uv: Pos2::ZERO,
-                color: floor_color,
-            });
-            mesh.indices.extend([idx, idx + 1, idx + 2]);
-        }
-        painter.add(Shape::mesh(mesh));
-    }
-
-    // Pools of light under lamps that are on, below everything else.
-    for item in &app.furniture {
-        draw_light_pool(app, painter, item);
-    }
-
-    for idx in draw_order(&app.furniture) {
+    for idx in 0..app.furniture.len() {
         let item = &app.furniture[idx];
-        let selected = app.selected_furniture == Some(idx);
+        let selected = app.is_furniture_selected(idx)
+            || app
+                .selection_rect
+                .is_some_and(|rect| rect.contains(item.position));
         let hovered = hovered_furniture == Some(idx) && app.current_tool == Tool::Select;
-        draw_furniture(app, painter, item, selected, hovered);
+        draw_furniture_overlay(app, painter, item, selected, hovered);
     }
 
     for room in &app.rooms {
@@ -77,7 +43,12 @@ pub fn draw_scene(
     }
 
     if let Some(item) = app.selected_furniture.and_then(|i| app.furniture.get(i)) {
-        draw_wall_distances(app, painter, item);
+        if app.extra_furniture.is_empty() {
+            draw_wall_distances(app, painter, item);
+        }
+        if app.current_tool == Tool::Select {
+            draw_rotation_handle(app, painter, item);
+        }
     }
 
     if let Some(snapped_pos) = snapped_preview {
@@ -107,14 +78,32 @@ pub fn draw_scene(
                             offset_dir = -normal;
                         }
                     }
-                    let offset = offset_dir * (25.0 / app.zoom_factor);
+                    let offset = offset_dir * (25.0 / app.scale());
 
-                    let p_start = wall.start + offset;
-                    let p_end = wall.end + offset;
+                    // Clear distances along the face on this side, from the walls already
+                    // there to the surfaces of the new wall.
+                    let side = if offset_dir.dot(wall_frame(wall).1) >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    let face = wall_face(&app.walls, wall_idx, side);
+                    let u = (snap_pos - wall.start).dot(dir);
+                    let (from, to) = face
+                        .pieces
+                        .iter()
+                        .copied()
+                        .find(|&(a, b)| u >= a - 1.0 && u <= b + 1.0)
+                        .unwrap_or((face.start, face.end));
+                    let half_wall = WALL_THICKNESS * PIXELS_PER_METER / 2.0;
+                    let (face_start, face_end) = (face.point(wall, from), face.point(wall, to));
+
+                    let p_start = face_start + offset;
+                    let p_end = face_end + offset;
                     let p_cursor = snap_pos + offset;
 
-                    let dist_start = snap_pos.distance(wall.start) / PIXELS_PER_METER;
-                    let dist_end = snap_pos.distance(wall.end) / PIXELS_PER_METER;
+                    let dist_start = (u - half_wall - from) / PIXELS_PER_METER;
+                    let dist_end = (to - u - half_wall) / PIXELS_PER_METER;
 
                     let dim_color = Color32::from_rgb(0, 150, 200);
                     let stroke = Stroke::new(1.0, dim_color);
@@ -130,7 +119,7 @@ pub fn draw_scene(
                     );
                     painter.line_segment(
                         [
-                            app.world_to_screen(wall.start),
+                            app.world_to_screen(face_start),
                             app.world_to_screen(p_start),
                         ],
                         faint,
@@ -140,7 +129,7 @@ pub fn draw_scene(
                         faint,
                     );
                     painter.line_segment(
-                        [app.world_to_screen(wall.end), app.world_to_screen(p_end)],
+                        [app.world_to_screen(face_end), app.world_to_screen(p_end)],
                         faint,
                     );
 
@@ -151,7 +140,7 @@ pub fn draw_scene(
                     if dist_start > 0.1 {
                         painter.text(
                             app.world_to_screen(
-                                p_start.lerp(p_cursor, 0.5) + offset_dir * (8.0 / app.zoom_factor),
+                                p_start.lerp(p_cursor, 0.5) + offset_dir * (8.0 / app.scale()),
                             ),
                             egui::Align2::CENTER_CENTER,
                             format!("{:.2} m", dist_start),
@@ -162,7 +151,7 @@ pub fn draw_scene(
                     if dist_end > 0.1 {
                         painter.text(
                             app.world_to_screen(
-                                p_cursor.lerp(p_end, 0.5) + offset_dir * (8.0 / app.zoom_factor),
+                                p_cursor.lerp(p_end, 0.5) + offset_dir * (8.0 / app.scale()),
                             ),
                             egui::Align2::CENTER_CENTER,
                             format!("{:.2} m", dist_end),
@@ -181,14 +170,30 @@ pub fn draw_scene(
                     Stroke::new(4.0, Color32::from_gray(150)),
                 );
 
-                if start.distance(end) > (5.0 / app.zoom_factor) {
-                    let length_m = start.distance(end) / PIXELS_PER_METER;
+                if start.distance(end) > (5.0 / app.scale()) {
+                    // Measured as it will be once placed, against the walls it joins.
+                    let mut walls = app.walls.clone();
+                    walls.push(Wall::new(start, end));
+                    let length_m = clear_length(&walls, walls.len() - 1);
                     painter.text(
-                        app.world_to_screen(
-                            start.lerp(end, 0.5) + vec2(0.0, -15.0 / app.zoom_factor),
-                        ),
+                        app.world_to_screen(start.lerp(end, 0.5) + vec2(0.0, -15.0 / app.scale())),
                         egui::Align2::CENTER_BOTTOM,
-                        format!("{:.2} m\n[ESC] to cancel", length_m),
+                        if app.length_input.is_empty() {
+                            format!(
+                                "{:.2} m\n[ESC] to cancel · type a length for exact size",
+                                length_m
+                            )
+                        } else {
+                            let unit = if app.length_input.contains(['.', ',']) {
+                                "m"
+                            } else {
+                                "cm"
+                            };
+                            format!(
+                                "⌨ {} {unit}  ·  Enter to place\n(inside {:.2} m)",
+                                app.length_input, length_m
+                            )
+                        },
                         egui::FontId::proportional(13.0),
                         Color32::BLACK,
                     );
@@ -236,7 +241,7 @@ pub fn draw_scene(
                         }
 
                         let display_angle = diff.abs().to_degrees();
-                        let radius = 30.0 / app.zoom_factor;
+                        let radius = 30.0 / app.scale();
                         let steps = 32;
                         let mut arc_points = Vec::new();
 
@@ -253,7 +258,7 @@ pub fn draw_scene(
                         let mid_angle = angle1 + diff / 2.0;
                         let text_pos = start
                             + vec2(mid_angle.cos(), mid_angle.sin())
-                                * (radius + (15.0 / app.zoom_factor));
+                                * (radius + (15.0 / app.scale()));
 
                         painter.text(
                             app.world_to_screen(text_pos),
@@ -269,7 +274,7 @@ pub fn draw_scene(
                         }
                         painter.text(
                             app.world_to_screen(
-                                start.lerp(end, 0.5) + vec2(0.0, 15.0 / app.zoom_factor),
+                                start.lerp(end, 0.5) + vec2(0.0, 15.0 / app.scale()),
                             ),
                             egui::Align2::CENTER_TOP,
                             format!("{:.1}°", abs_angle),
@@ -282,19 +287,29 @@ pub fn draw_scene(
         }
     }
 
+    // While walls are being moved, the walls joined to them show their changing sizes.
+    let affected_walls: HashSet<usize> = if app.wall_drag.is_some() {
+        touching_walls(&app.walls, &app.selected_walls)
+    } else if let Some(&(i, is_start)) = app.dragging_endpoints.first() {
+        // A dragged corner only changes the walls it lies on.
+        let corner = if is_start {
+            app.walls[i].start
+        } else {
+            app.walls[i].end
+        };
+        (0..app.walls.len())
+            .filter(|&w| !app.dragging_endpoints.iter().any(|&(d, _)| d == w))
+            .filter(|&w| {
+                let wall = &app.walls[w];
+                corner.distance(closest_point_on_segment(corner, wall.start, wall.end)) < 2.0
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     for (idx, wall) in app.walls.iter().enumerate() {
         let mut is_selected = app.selected_walls.contains(&idx);
-        if let Some(drag) = &app.furniture_drag {
-            for wall in drag.snapped_walls.iter().filter_map(|&i| app.walls.get(i)) {
-                painter.line_segment(
-                    [
-                        app.world_to_screen(wall.start),
-                        app.world_to_screen(wall.end),
-                    ],
-                    Stroke::new(4.0, Color32::from_rgb(0, 190, 120)),
-                );
-            }
-        }
 
         if let Some(rect) = app.selection_rect {
             if rect.contains(wall.start) || rect.contains(wall.end) {
@@ -303,46 +318,24 @@ pub fn draw_scene(
         }
 
         let is_hovered = hovered_wall_idx == Some(idx) && app.current_tool == Tool::Select;
-        let wall_color = if is_selected {
-            SELECTED
-        } else if is_hovered {
-            HOVERED
-        } else {
-            WALL_COLOR
-        };
-        // Walls are drawn at their real thickness, but never thinner than a few pixels.
-        let base_width = (WALL_THICKNESS * PIXELS_PER_METER * app.zoom_factor).max(4.0);
-        let stroke_width = if is_selected || is_hovered {
-            base_width + 2.0
-        } else {
-            base_width
-        };
-
-        painter.line_segment(
-            [
-                app.world_to_screen(wall.start),
-                app.world_to_screen(wall.end),
-            ],
-            Stroke::new(stroke_width, wall_color),
-        );
-
-        let node_radius = if is_selected {
-            stroke_width / 2.0 + 2.0
-        } else {
-            stroke_width / 2.0
-        };
-        painter.circle_filled(app.world_to_screen(wall.start), node_radius, wall_color);
-        painter.circle_filled(app.world_to_screen(wall.end), node_radius, wall_color);
+        if is_selected {
+            // The wall itself is tinted in 3D; mark its corners so they can be grabbed.
+            for p in [wall.start, wall.end] {
+                let s = app.world_to_screen(p);
+                painter.circle_filled(s, 4.5, Color32::WHITE);
+                painter.circle_stroke(s, 4.5, Stroke::new(2.0, SELECTED));
+            }
+        }
 
         if is_selected && app.current_tool == Tool::Select {
-            let length_m = wall.start.distance(wall.end) / PIXELS_PER_METER;
+            let length_m = clear_length(&app.walls, idx);
             let mut angle = (wall.end - wall.start).angle().to_degrees();
             if angle < 0.0 {
                 angle += 360.0;
             }
             painter.text(
                 app.world_to_screen(
-                    wall.start.lerp(wall.end, 0.5) + vec2(0.0, -12.0 / app.zoom_factor),
+                    wall.start.lerp(wall.end, 0.5) + vec2(0.0, -12.0 / app.scale()),
                 ),
                 egui::Align2::CENTER_BOTTOM,
                 format!("{:.2} m | {:.0}°", length_m, angle),
@@ -351,118 +344,32 @@ pub fn draw_scene(
             );
         }
 
-        if is_hovered && app.current_tool == Tool::Select && !is_selected {
-            let mut split_points = vec![wall.start, wall.end];
-            for (other_idx, other_wall) in app.walls.iter().enumerate() {
-                if other_idx == idx {
-                    continue;
-                }
-                for &ep in &[other_wall.start, other_wall.end] {
-                    let proj = closest_point_on_segment(ep, wall.start, wall.end);
-                    if ep.distance(proj) < 2.0 {
-                        split_points.push(proj);
-                    }
-                }
-            }
+        let stretched = app
+            .wall_drag
+            .as_ref()
+            .and_then(|d| d.stretched_from(idx))
+            .map(|old| wall.length() - old);
+        if (is_hovered && app.current_tool == Tool::Select && !is_selected)
+            || affected_walls.contains(&idx)
+        {
+            draw_wall_dimensions(app, painter, idx, pointer, stretched);
+        }
+    }
 
-            split_points.sort_by(|a, b| {
-                wall.start
-                    .distance(*a)
-                    .partial_cmp(&wall.start.distance(*b))
-                    .unwrap()
-            });
-            split_points.dedup_by(|a, b| a.distance(*b) < 2.0);
-
-            let dir = (wall.end - wall.start).normalized();
-            let normal = vec2(-dir.y, dir.x);
-            let mut offset_dir = normal;
-            if let Some(mouse_pos) = pointer {
-                if (mouse_pos - wall.start).dot(normal) < 0.0 {
-                    offset_dir = -normal;
-                }
-            }
-
-            let dim_color = Color32::from_rgb(255, 140, 0);
-            let text_color = Color32::from_rgb(220, 100, 0);
-            let stroke = Stroke::new(1.5, dim_color);
-            let faint_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 140, 0, 80));
-
-            let total_offset = offset_dir * (40.0 / app.zoom_factor);
-            let p_start = wall.start + total_offset;
-            let p_end = wall.end + total_offset;
-            let total_len = wall.start.distance(wall.end) / PIXELS_PER_METER;
-
-            painter.line_segment(
-                [app.world_to_screen(p_start), app.world_to_screen(p_end)],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    app.world_to_screen(wall.start),
-                    app.world_to_screen(p_start),
-                ],
-                faint_stroke,
-            );
-            painter.line_segment(
-                [app.world_to_screen(wall.end), app.world_to_screen(p_end)],
-                faint_stroke,
-            );
-            painter.circle_filled(app.world_to_screen(p_start), 2.5, dim_color);
-            painter.circle_filled(app.world_to_screen(p_end), 2.5, dim_color);
-
-            painter.text(
-                app.world_to_screen(
-                    p_start.lerp(p_end, 0.5) + offset_dir * (10.0 / app.zoom_factor),
-                ),
-                egui::Align2::CENTER_CENTER,
-                format!("{:.2} m", total_len),
-                egui::FontId::proportional(14.0),
-                text_color,
-            );
-
-            if split_points.len() > 2 {
-                let sub_offset = offset_dir * (20.0 / app.zoom_factor);
-                for i in 0..split_points.len() - 1 {
-                    let s1 = split_points[i];
-                    let s2 = split_points[i + 1];
-                    let ps1 = s1 + sub_offset;
-                    let ps2 = s2 + sub_offset;
-                    let sub_len = s1.distance(s2) / PIXELS_PER_METER;
-
-                    if sub_len > 0.1 {
-                        painter.line_segment(
-                            [app.world_to_screen(ps1), app.world_to_screen(ps2)],
-                            stroke,
-                        );
-                        painter.line_segment(
-                            [app.world_to_screen(s1), app.world_to_screen(ps1)],
-                            faint_stroke,
-                        );
-                        painter.line_segment(
-                            [app.world_to_screen(s2), app.world_to_screen(ps2)],
-                            faint_stroke,
-                        );
-                        painter.circle_filled(app.world_to_screen(ps1), 2.5, dim_color);
-                        painter.circle_filled(app.world_to_screen(ps2), 2.5, dim_color);
-                        painter.text(
-                            app.world_to_screen(
-                                ps1.lerp(ps2, 0.5) + offset_dir * (10.0 / app.zoom_factor),
-                            ),
-                            egui::Align2::CENTER_CENTER,
-                            format!("{:.2} m", sub_len),
-                            egui::FontId::proportional(12.0),
-                            text_color,
-                        );
-                    }
-                }
-            }
+    // What a moved wall has lined up with.
+    if let Some(drag) = &app.wall_drag {
+        let stroke = Stroke::new(1.0, Color32::from_rgb(220, 50, 120));
+        for &(a, b) in &drag.guides {
+            let (a, b) = (app.world_to_screen(a), app.world_to_screen(b));
+            painter.extend(Shape::dashed_line(&[a, b], stroke, 6.0, 4.0));
+            painter.circle_stroke(b, 4.0, stroke);
         }
     }
 
     // Windows and doors are drawn over the walls they sit in.
     let hovered_opening = pointer
-        .filter(|_| app.current_tool == Tool::Select)
-        .and_then(|p| opening_at(&app.walls, p, app.zoom_factor));
+        .filter(|_| app.current_tool == Tool::Select && hovered_furniture.is_none())
+        .and_then(|p| opening_at(&app.walls, p, app.scale()));
     for (wi, wall) in app.walls.iter().enumerate() {
         for (oi, opening) in wall.openings.iter().enumerate() {
             let state = if app.selected_opening == Some((wi, oi)) {
@@ -478,16 +385,12 @@ pub fn draw_scene(
     if let Some((wi, opening)) = &app.opening_preview {
         if let Some(wall) = app.walls.get(*wi) {
             draw_opening(app, painter, wall, opening, OpeningState::Preview);
-            draw_opening_dimensions(app, painter, wall, opening);
+            draw_opening_dimensions(app, painter, *wi, opening);
         }
     }
     if let Some((wi, oi)) = app.selected_opening {
-        if let Some((wall, opening)) = app
-            .walls
-            .get(wi)
-            .and_then(|w| Some((w, w.openings.get(oi)?)))
-        {
-            draw_opening_dimensions(app, painter, wall, opening);
+        if let Some(opening) = app.walls.get(wi).and_then(|w| w.openings.get(oi)) {
+            draw_opening_dimensions(app, painter, wi, opening);
         }
     }
 
@@ -536,6 +439,22 @@ pub fn draw_scene(
         }
     }
 
+    // Lines of other furniture (or walls) a moved or resized piece is snapped to.
+    let no_guides = Vec::new();
+    let drag_guides = app.furniture_drag.as_ref().map(|d| &d.guides);
+    let resize_guides = app.furniture_resize.as_ref().map(|r| &r.guides);
+    for guides in [drag_guides, resize_guides] {
+        for &(from, to) in guides.unwrap_or(&no_guides) {
+            let out = (to - from).normalized() * 0.2 * PIXELS_PER_METER;
+            painter.line_segment(
+                [
+                    app.world_to_screen(from - out),
+                    app.world_to_screen(to + out),
+                ],
+                Stroke::new(1.5, Color32::from_rgb(0, 190, 120)),
+            );
+        }
+    }
     if let Some(drag) = &app.furniture_drag {
         for wall in drag.snapped_walls.iter().filter_map(|&i| app.walls.get(i)) {
             painter.line_segment(
@@ -566,40 +485,102 @@ pub fn draw_scene(
 }
 
 /// Background grid: 10 cm squares with a stronger line every meter, fading out when zoomed away.
-pub fn draw_grid(app: &RoomPlannerApp, painter: &Painter, rect: Rect) {
-    let world = app.visible_world_rect;
-    let meter_px = PIXELS_PER_METER * app.zoom_factor;
-    let mut levels = vec![(PIXELS_PER_METER, Color32::from_rgb(226, 228, 233))];
-    if meter_px / 10.0 >= 7.0 {
-        levels.insert(
-            0,
-            (PIXELS_PER_METER / 10.0, Color32::from_rgb(240, 241, 244)),
+/// Dimension lines along a wall: its full length, and the pieces between the walls that
+/// join it. `change` is how much it was just stretched, in meters.
+fn draw_rotation_handle(app: &RoomPlannerApp, painter: &Painter, item: &Furniture) {
+    let Some((stem, knob)) = rotation_handle(app) else {
+        return;
+    };
+    let rotating = app.furniture_rotate.is_some();
+    painter.line_segment([stem, knob], Stroke::new(1.5, SELECTED));
+    painter.circle_filled(knob, 6.0, Color32::WHITE);
+    painter.circle_stroke(knob, 6.0, Stroke::new(2.0, SELECTED));
+    painter.text(
+        knob,
+        egui::Align2::CENTER_CENTER,
+        "⟳",
+        egui::FontId::proportional(9.0),
+        SELECTED,
+    );
+    if rotating {
+        let degrees = item.rotation.to_degrees().rem_euclid(360.0).round() % 360.0;
+        painter.text(
+            knob + (knob - stem).normalized() * 12.0,
+            egui::Align2::CENTER_CENTER,
+            format!("{degrees:.0}°"),
+            egui::FontId::proportional(13.0),
+            Color32::from_rgb(0, 80, 200),
         );
-    } else if meter_px < 12.0 {
-        levels = vec![(PIXELS_PER_METER * 5.0, Color32::from_rgb(226, 228, 233))];
     }
-    for (step, color) in levels {
-        let stroke = Stroke::new(1.0, color);
-        let mut x = (world.min.x / step).floor() * step;
-        while x <= world.max.x {
-            let sx = app.world_to_screen(Pos2::new(x, 0.0)).x;
-            painter.line_segment(
-                [Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())],
-                stroke,
-            );
-            x += step;
-        }
-        let mut y = (world.min.y / step).floor() * step;
-        while y <= world.max.y {
-            let sy = app.world_to_screen(Pos2::new(0.0, y)).y;
-            painter.line_segment(
-                [Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)],
-                stroke,
-            );
-            y += step;
-        }
-    }
+}
 
+fn draw_wall_dimensions(
+    app: &RoomPlannerApp,
+    painter: &Painter,
+    idx: usize,
+    pointer: Option<Pos2>,
+    change: Option<f32>,
+) {
+    let wall = &app.walls[idx];
+    let (_, normal) = wall_frame(wall);
+    // Measure the face on the pointer's side, with the dimension lines outside it.
+    let side = match pointer {
+        Some(p) if (p - wall.start).dot(normal) < 0.0 => -1.0,
+        _ => 1.0,
+    };
+    let face = wall_face(&app.walls, idx, side);
+    let offset_dir = normal * side;
+
+    let dim_color = Color32::from_rgb(255, 140, 0);
+    let text_color = Color32::from_rgb(220, 100, 0);
+    let stroke = Stroke::new(1.5, dim_color);
+    let faint_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 140, 0, 80));
+
+    // A dimension line `gap` pixels out from the face, between two distances along the wall.
+    let dimension = |from: f32, to: f32, gap: f32, text: String, size: f32| {
+        let (s1, s2) = (face.point(wall, from), face.point(wall, to));
+        let out = offset_dir * (gap / app.scale());
+        let (p1, p2) = (s1 + out, s2 + out);
+        painter.line_segment([app.world_to_screen(p1), app.world_to_screen(p2)], stroke);
+        painter.line_segment(
+            [app.world_to_screen(s1), app.world_to_screen(p1)],
+            faint_stroke,
+        );
+        painter.line_segment(
+            [app.world_to_screen(s2), app.world_to_screen(p2)],
+            faint_stroke,
+        );
+        painter.circle_filled(app.world_to_screen(p1), 2.5, dim_color);
+        painter.circle_filled(app.world_to_screen(p2), 2.5, dim_color);
+        painter.text(
+            app.world_to_screen(p1.lerp(p2, 0.5) + offset_dir * (10.0 / app.scale())),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(size),
+            text_color,
+        );
+    };
+
+    let total_len = face.length();
+    let total_text = match change {
+        Some(change) if change.abs() >= 0.005 => format!("{total_len:.2} m ({change:+.2})"),
+        _ => format!("{total_len:.2} m"),
+    };
+    dimension(face.start, face.end, 40.0, total_text, 14.0);
+
+    if face.pieces.len() > 1 {
+        for &(from, to) in &face.pieces {
+            let len = (to - from) / PIXELS_PER_METER;
+            if len > 0.1 {
+                dimension(from, to, 20.0, format!("{len:.2} m"), 12.0);
+            }
+        }
+    }
+}
+
+/// Scale bar in the bottom-left corner of the top view.
+pub fn draw_scale_bar(app: &RoomPlannerApp, painter: &Painter, rect: Rect) {
+    let meter_px = PIXELS_PER_METER * app.zoom_factor;
     // Scale bar in the bottom-left corner.
     let length_m = [0.5, 1.0, 2.0, 5.0, 10.0]
         .into_iter()
@@ -621,6 +602,8 @@ pub fn draw_grid(app: &RoomPlannerApp, painter: &Painter, rect: Rect) {
 }
 
 fn draw_room_label(app: &RoomPlannerApp, painter: &Painter, polygon: &[Pos2]) {
+    // The floor area inside the walls, not up to their center lines.
+    let polygon = &room_interior(polygon);
     // Shoelace formula for area and centroid.
     let mut area = 0.0;
     let mut centroid = Vec2::ZERO;
@@ -635,7 +618,7 @@ fn draw_room_label(app: &RoomPlannerApp, painter: &Painter, polygon: &[Pos2]) {
     }
     let centroid = (centroid / (3.0 * area)).to_pos2();
     let area_m2 = area.abs() / 2.0 / (PIXELS_PER_METER * PIXELS_PER_METER);
-    if area_m2 * PIXELS_PER_METER * app.zoom_factor < 20.0 {
+    if area_m2 * PIXELS_PER_METER * app.scale() < 20.0 {
         return;
     }
     painter.text(
@@ -647,144 +630,44 @@ fn draw_room_label(app: &RoomPlannerApp, painter: &Painter, polygon: &[Pos2]) {
     );
 }
 
-fn draw_light_pool(app: &RoomPlannerApp, painter: &Painter, item: &Furniture) {
-    let Some(light) = lamp::light(item) else {
-        return;
-    };
-    let center = app.world_to_screen(item.local_to_world(light.local[0], light.local[2]));
-    // Rough radius where the floor is still noticeably lit.
-    let reach_m = 0.9 * light.color.iter().cloned().fold(0.0, f32::max).sqrt() + 0.6;
-    let radius = reach_m * PIXELS_PER_METER * app.zoom_factor;
-    let [r, g, b] = lamp::kelvin_to_srgb(match item.kind {
-        FurnitureKind::Lamp { kelvin, .. } => kelvin,
-        _ => 2700.0,
-    });
-    for step in 0..12 {
-        let t = 1.0 - step as f32 / 12.0;
-        painter.circle_filled(
-            center,
-            radius * t,
-            Color32::from_rgba_unmultiplied(r, g, b.saturating_sub(40), 8),
-        );
-    }
-}
-
-/// Draws a piece of furniture top-down: each part's outline, lowest first, so taller parts
-/// (a sofa's back and arms, a table top) end up on top.
-fn draw_furniture(
+/// The selection outline and the name label, drawn over all furniture so they stay readable.
+fn draw_furniture_overlay(
     app: &RoomPlannerApp,
     painter: &Painter,
     item: &Furniture,
     selected: bool,
     hovered: bool,
 ) {
-    let outline = Stroke::new(1.0, Color32::from_rgb(90, 90, 95));
-    let to_screen = |x: f32, z: f32| app.world_to_screen(item.local_to_world(x, z));
-    // Things hanging above head height are drawn see-through, like on architectural plans.
-    let overhead = item.elevation > 1.2
-        || matches!(
-            item.kind,
-            FurnitureKind::Lamp {
-                style: LampStyle::Pendant,
-                ..
-            }
-        );
-    let alpha = if overhead { 120 } else { 235 };
-
-    let mut parts = item.parts();
-    parts.sort_by(|a, b| a.max[1].total_cmp(&b.max[1]));
-
-    if parts.is_empty() {
-        // Imported model: draw its bounding footprint.
-        let [r, g, b] = item.color;
-        let corners: Vec<Pos2> = item
-            .footprint()
-            .iter()
-            .map(|p| app.world_to_screen(*p))
-            .collect();
-        painter.add(Shape::convex_polygon(
-            corners.clone(),
-            Color32::from_rgba_unmultiplied(r, g, b, alpha),
-            outline,
-        ));
-        painter.line_segment(
-            [corners[0], corners[2]],
-            Stroke::new(0.5, Color32::from_gray(150)),
-        );
-        painter.line_segment(
-            [corners[1], corners[3]],
-            Stroke::new(0.5, Color32::from_gray(150)),
-        );
-    }
-
-    for part in &parts {
-        // Hairline parts like a pendant's cord would only add clutter from above.
-        if part.max[0] - part.min[0] < 0.015 {
-            continue;
-        }
-        let [r, g, b] = part.color;
-        let fill = Color32::from_rgba_unmultiplied(r, g, b, alpha);
-        let points: Vec<Pos2> = match part.shape {
-            PartShape::Box => vec![
-                to_screen(part.min[0], part.min[2]),
-                to_screen(part.max[0], part.min[2]),
-                to_screen(part.max[0], part.max[2]),
-                to_screen(part.min[0], part.max[2]),
-            ],
-            shape => {
-                let scale = match shape {
-                    PartShape::Cone { top_scale } => top_scale.max(1.0),
-                    _ => 1.0,
-                };
-                let c = [
-                    (part.min[0] + part.max[0]) / 2.0,
-                    (part.min[2] + part.max[2]) / 2.0,
-                ];
-                let r = [
-                    (part.max[0] - part.min[0]) / 2.0 * scale,
-                    (part.max[2] - part.min[2]) / 2.0 * scale,
-                ];
-                (0..32)
-                    .map(|i| {
-                        let a = i as f32 / 32.0 * std::f32::consts::TAU;
-                        to_screen(c[0] + r[0] * a.cos(), c[1] + r[1] * a.sin())
-                    })
-                    .collect()
-            }
-        };
-        painter.add(Shape::convex_polygon(points, fill, outline));
-    }
-
-    if item.is_lamp() {
-        // Classic lamp symbol: a circle with a cross.
-        let center = app.world_to_screen(item.position);
-        let r = (item.width.min(item.depth) * PIXELS_PER_METER * app.zoom_factor * 0.25)
-            .clamp(3.0, 9.0);
-        let stroke = Stroke::new(1.2, Color32::from_rgb(80, 70, 40));
-        painter.circle_stroke(center, r, stroke);
-        let d = r * std::f32::consts::FRAC_1_SQRT_2;
-        painter.line_segment([center - vec2(d, d), center + vec2(d, d)], stroke);
-        painter.line_segment([center - vec2(d, -d), center + vec2(d, -d)], stroke);
-    } else if !matches!(item.kind, FurnitureKind::Plant) {
-        // Mark the front edge so rotation is readable at a glance.
-        let (hw, hd) = (item.width / 2.0, item.depth / 2.0);
-        painter.line_segment(
-            [to_screen(-hw * 0.6, hd), to_screen(hw * 0.6, hd)],
-            Stroke::new(2.0, Color32::from_gray(110)),
-        );
-    }
-
     if selected || hovered {
         let color = if selected { SELECTED } else { HOVERED };
-        let corners: Vec<Pos2> = item
-            .footprint()
+        let stroke = Stroke::new(if selected { 2.0 } else { 1.5 }, color);
+        let footprint = item.footprint();
+        let (y0, y1) = (item.elevation, item.elevation + item.height);
+        let bottom: Vec<Pos2> = footprint
             .iter()
-            .map(|p| app.world_to_screen(*p))
+            .map(|p| app.world3_to_screen(*p, y0))
             .collect();
-        painter.add(Shape::closed_line(
-            corners.clone(),
-            Stroke::new(if selected { 2.0 } else { 1.5 }, color),
-        ));
+        let top: Vec<Pos2> = footprint
+            .iter()
+            .map(|p| app.world3_to_screen(*p, y1))
+            .collect();
+        // A box around the piece; from straight above it is just the outline.
+        painter.add(Shape::closed_line(top.clone(), stroke));
+        if app.camera_mode != CameraMode::Top {
+            painter.add(Shape::closed_line(bottom.clone(), Stroke::new(1.0, color)));
+            for (a, b) in bottom.iter().zip(&top) {
+                painter.line_segment([*a, *b], Stroke::new(1.0, color));
+            }
+        }
+        let mut corners = top;
+        // Corners and sides can be dragged to resize a single selected piece.
+        let primary = app
+            .selected_furniture
+            .and_then(|i| app.furniture.get(i))
+            .is_some_and(|p| std::ptr::eq(p, item));
+        if let Some(handles) = crate::tools::input::resize_handles(app).filter(|_| primary) {
+            corners = handles.iter().map(|(p, _)| *p).collect();
+        }
         if selected {
             for corner in corners {
                 painter.rect_filled(
@@ -802,10 +685,9 @@ fn draw_furniture(
         }
     }
 
-    let screen_width = item.width * PIXELS_PER_METER * app.zoom_factor;
-    let screen_depth = item.depth * PIXELS_PER_METER * app.zoom_factor;
-    if selected || hovered || screen_width.min(screen_depth) > 45.0 {
-        let center = app.world_to_screen(item.position);
+    let screen_depth = item.depth * PIXELS_PER_METER * app.scale();
+    if selected || hovered {
+        let center = app.world3_to_screen(item.position, item.elevation + item.height);
         let mut text = format!(
             "{}\n{:.0} × {:.0} cm",
             item.name,
@@ -886,39 +768,9 @@ fn draw_wall_distances(app: &RoomPlannerApp, painter: &Painter, item: &Furniture
     }
 }
 
-/// The walk-mode viewer: a person with a view cone and a draggable arrow to turn.
-pub fn draw_viewer(app: &RoomPlannerApp, painter: &Painter) {
-    let (body, handle) = viewer_handles(app);
-    let half_fov = 30.0_f32.to_radians();
-    let cone_len = 90.0;
-    let cone: Vec<Pos2> = std::iter::once(body)
-        .chain((0..=12).map(|i| {
-            let a = app.camera_angle - half_fov + 2.0 * half_fov * i as f32 / 12.0;
-            body + vec2(a.cos(), a.sin()) * cone_len
-        }))
-        .collect();
-    painter.add(Shape::convex_polygon(
-        cone,
-        Color32::from_rgba_unmultiplied(37, 99, 235, 28),
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(37, 99, 235, 90)),
-    ));
-    painter.line_segment([body, handle], Stroke::new(2.0, ACCENT));
-    painter.circle_filled(handle, 6.0, Color32::WHITE);
-    painter.circle_stroke(handle, 6.0, Stroke::new(2.0, ACCENT));
-    painter.circle_filled(body, 9.0, ACCENT);
-    painter.circle_stroke(body, 9.0, Stroke::new(2.0, Color32::WHITE));
-    painter.text(
-        body + vec2(0.0, 14.0),
-        egui::Align2::CENTER_TOP,
-        "You",
-        egui::FontId::proportional(11.0),
-        ACCENT,
-    );
-}
-
 /// Furniture being dragged in from the library, before it is dropped.
 pub fn draw_drop_preview(app: &RoomPlannerApp, painter: &Painter, item: &Furniture) {
-    draw_furniture(app, painter, item, true, false);
+    draw_furniture_overlay(app, painter, item, true, false);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -944,8 +796,7 @@ pub fn draw_opening(
     let half = opening.width / 2.0 * PIXELS_PER_METER;
     let (a, b) = (center - dir * half, center + dir * half);
     // Same on-screen thickness as the wall stroke, in world units.
-    let thickness =
-        (WALL_THICKNESS * PIXELS_PER_METER * app.zoom_factor).max(4.0) / app.zoom_factor;
+    let thickness = (WALL_THICKNESS * PIXELS_PER_METER * app.scale()).max(4.0) / app.scale();
     let across = normal * thickness / 2.0;
     let s = |p: Pos2| app.world_to_screen(p);
 
@@ -954,29 +805,9 @@ pub fn draw_opening(
         OpeningState::Hovered | OpeningState::Preview => HOVERED,
         OpeningState::Normal => WALL_COLOR,
     };
-    let line = Stroke::new(1.2, color);
-
-    // Cut the gap out of the wall.
-    painter.add(Shape::convex_polygon(
-        vec![s(a - across), s(b - across), s(b + across), s(a + across)],
-        Color32::WHITE,
-        Stroke::NONE,
-    ));
-    // Jambs.
-    painter.line_segment([s(a - across), s(a + across)], Stroke::new(2.0, color));
-    painter.line_segment([s(b - across), s(b + across)], Stroke::new(2.0, color));
-
-    if opening.kind.glazed() {
-        let inset = across * 0.25;
-        painter.line_segment([s(a - inset), s(b - inset)], line);
-        painter.line_segment([s(a + inset), s(b + inset)], line);
-        if opening.kind == OpeningKind::Window {
-            painter.line_segment([s(a - across), s(b - across)], Stroke::new(0.8, color));
-            painter.line_segment([s(a + across), s(b + across)], Stroke::new(0.8, color));
-        }
-    }
-
-    if opening.kind.swings() {
+    // The opening itself is in the 3D walls; from above, doors also get their swing arc.
+    let top_view = app.camera_mode == CameraMode::Top;
+    if opening.kind.swings() && (top_view || state != OpeningState::Normal) {
         let (hinge, free) = if opening.flip_hinge { (b, a) } else { (a, b) };
         let side = if opening.flip_side { -normal } else { normal };
         let hinge = hinge + side * thickness / 2.0;
@@ -1001,31 +832,72 @@ pub fn draw_opening(
         painter.add(Shape::dashed_line(&arc, Stroke::new(1.0, color), 4.0, 3.0));
     }
 
-    if state == OpeningState::Selected || state == OpeningState::Preview {
-        let pad = across * 1.6;
-        painter.add(Shape::closed_line(
-            vec![s(a - pad), s(b - pad), s(b + pad), s(a + pad)],
-            Stroke::new(1.5, color),
-        ));
+    if state != OpeningState::Normal {
+        let stroke = Stroke::new(
+            if state == OpeningState::Hovered {
+                1.5
+            } else {
+                2.0
+            },
+            color,
+        );
+        if top_view {
+            let pad = across * 1.6;
+            painter.add(Shape::closed_line(
+                vec![s(a - pad), s(b - pad), s(b + pad), s(a + pad)],
+                stroke,
+            ));
+        } else {
+            // Outline the hole in the wall on both faces.
+            let top = (opening.sill + opening.height).min(wall.height);
+            for side in [-1.0, 1.0] {
+                let off = normal * side * WALL_THICKNESS / 2.0 * PIXELS_PER_METER;
+                let pts = vec![
+                    app.world3_to_screen(a + off, opening.sill),
+                    app.world3_to_screen(b + off, opening.sill),
+                    app.world3_to_screen(b + off, top),
+                    app.world3_to_screen(a + off, top),
+                ];
+                painter.add(Shape::closed_line(pts, stroke));
+            }
+        }
     }
 }
 
 /// Distances from an opening to both ends of its wall, measured along the wall.
-fn draw_opening_dimensions(
-    app: &RoomPlannerApp,
-    painter: &Painter,
-    wall: &Wall,
-    opening: &Opening,
-) {
+/// Distances from a window or door to the surfaces of the walls around it, measured on the
+/// room side (the shorter face).
+fn draw_opening_dimensions(app: &RoomPlannerApp, painter: &Painter, wi: usize, opening: &Opening) {
+    let wall = &app.walls[wi];
     let (dir, normal) = wall_frame(wall);
     let length = wall.length();
     let center = opening.clamped_offset(length);
     let (left, right) = (center - opening.width / 2.0, center + opening.width / 2.0);
     let color = Color32::from_rgb(220, 90, 30);
-    let offset = normal * (WALL_THICKNESS * PIXELS_PER_METER / 2.0 + 18.0 / app.zoom_factor);
+
+    let faces = [
+        wall_face(&app.walls, wi, 1.0),
+        wall_face(&app.walls, wi, -1.0),
+    ];
+    let face = if faces[1].length() < faces[0].length() {
+        &faces[1]
+    } else {
+        &faces[0]
+    };
+    let c = center * PIXELS_PER_METER;
+    let (from, to) = face
+        .pieces
+        .iter()
+        .copied()
+        .find(|&(a, b)| c >= a && c <= b)
+        .unwrap_or((face.start, face.end));
+    let (from, to) = (from / PIXELS_PER_METER, to / PIXELS_PER_METER);
+
+    let offset =
+        normal * face.side * (WALL_THICKNESS * PIXELS_PER_METER / 2.0 + 18.0 / app.scale());
     let at = |m: f32| app.world_to_screen(wall.start + dir * m * PIXELS_PER_METER + offset);
 
-    for (from, to) in [(0.0, left), (left, right), (right, length)] {
+    for (from, to) in [(from, left), (left, right), (right, to)] {
         let gap = to - from;
         if gap < 0.005 {
             continue;

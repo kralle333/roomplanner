@@ -12,7 +12,12 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             ui.horizontal_centered(|ui| {
                 // Right-hand info first, so the hint gets whatever space is left and truncates.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{:.0}%", app.zoom_factor * 100.0)).size(12.0));
+                    let view = match app.camera_mode {
+                        CameraMode::Top => format!("Top · {:.0}%", app.zoom_factor * 100.0),
+                        CameraMode::Orbit => "3D".to_owned(),
+                        CameraMode::Walk => "Walk".to_owned(),
+                    };
+                    ui.label(RichText::new(view).size(12.0));
                     ui.separator();
                     if let Some(p) = app.pointer_world {
                         ui.label(
@@ -33,9 +38,13 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "Untitled plan".to_owned());
                     let (mark, tip) = if app.is_dirty() {
-                        (" •", "Unsaved changes")
+                        (
+                            " •",
+                            "Not saved to a file yet. Your work is kept between sessions anyway; \
+                             Ctrl+S writes it to the file.",
+                        )
                     } else {
-                        ("", "All changes saved")
+                        ("", "Saved to the file")
                     };
                     ui.label(RichText::new(format!("{name}{mark}")).size(12.0))
                         .on_hover_text(tip);
@@ -63,12 +72,15 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
 }
 
 fn hint(app: &RoomPlannerApp) -> &'static str {
-    if app.camera_drag.is_some() {
-        return "Moving the viewer · drag the arrow to turn";
+    if app.camera_mode == CameraMode::Walk {
+        return "Drag to look around · arrow keys or WASD to walk · right-drag to step · T or the toolbar to leave";
     }
     match app.current_tool {
+        Tool::DrawWall if !app.length_input.is_empty() => {
+            "Enter places the wall at the typed length · Backspace to correct · Esc to clear"
+        }
         Tool::DrawWall if app.wall_start_point.is_some() => {
-            "Click to place the next corner · Esc to finish · walls snap to corners and alignments"
+            "Click the next corner, or type a length (350 = cm, 3.5 = m) + Enter · Esc to finish"
         }
         Tool::DrawWall => "Click to start a wall · V to switch to Select",
         Tool::PlaceOpening if app.opening_preview.is_some() => "Click to place it here · Esc to cancel",
@@ -76,20 +88,35 @@ fn hint(app: &RoomPlannerApp) -> &'static str {
         Tool::Select if app.selected_opening.is_some() => {
             "Drag along the wall to move · Del to delete · set sizes in the panel"
         }
+        Tool::Select if app.furniture_resize.is_some() => {
+            "Snaps to furniture and walls, else whole centimeters · Alt for any size · Shift on a corner keeps the proportions"
+        }
+        Tool::Select if app.furniture_rotate.is_some() => {
+            "Snaps to 15° steps · hold Alt to rotate freely"
+        }
         Tool::Select if app.furniture_drag.is_some() => {
-            "Snaps to walls · hold Alt to place freely · R to rotate"
+            "Snaps to walls and other furniture · hold Alt to place freely · R to rotate"
+        }
+        Tool::Select if !app.extra_furniture.is_empty() => {
+            "Drag to move together · edits in the panel apply to all · Ctrl+C copy · Del delete"
         }
         Tool::Select if app.selected_furniture.is_some() => {
-            "Drag to move · R rotate · O next option · Ctrl+D duplicate · Del delete · right-click for more"
+            "Drag to move · drag a corner or side to resize · drag ⟳ to rotate · Shift+click to add · Ctrl+C/V copy/paste · Del delete · right-click for more"
+        }
+        Tool::Select if app.wall_drag.is_some() => {
+            "Lines up with other walls · hold Ctrl to move freely · Alt to toggle resizing"
+        }
+        Tool::Select if !app.selected_walls.is_empty() && app.stretch_walls => {
+            "Drag to resize the room · Alt+drag to move the wall alone · drag corners to reshape · Del to delete"
         }
         Tool::Select if !app.selected_walls.is_empty() => {
-            "Drag to move walls · drag corners to reshape · Del to delete"
+            "Drag to move walls · Alt+drag to resize the room · drag corners to reshape · Del to delete"
         }
-        Tool::Select if app.camera_mode == CameraMode::Walk => {
-            "Drag the person to move the 3D viewpoint · drag the arrow to turn · right-click to add furniture"
+        Tool::Select if app.camera_mode == CameraMode::Orbit => {
+            "Click to select · rotate: two-finger scroll or right-drag · pan: Shift+two-finger or middle-drag · zoom: pinch or wheel · T for top view"
         }
         Tool::Select => {
-            "Click to select · drag empty space to box-select · right-click to add furniture · F to fit · F1 for shortcuts"
+            "Click to select · drag empty space to box-select · right-click for menu · T for 3D · F to fit · F1 for shortcuts"
         }
     }
 }

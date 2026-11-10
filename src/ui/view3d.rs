@@ -1,9 +1,11 @@
 use crate::{
-    app::{CameraMode, RoomPlannerApp, TimeOfDay, PIXELS_PER_METER, WALL_HEIGHT, WALL_THICKNESS},
+    app::{
+        CameraMode, Projection, RoomPlannerApp, TimeOfDay, PIXELS_PER_METER, WALL_HEIGHT,
+        WALL_THICKNESS,
+    },
     furniture::{lamp, mesh::LocalMesh, model::ModelMesh, Part},
     geometry::rooms::triangulate,
     models::{Furniture, FurnitureKind, Opening, OpeningKind, Wall},
-    ui::theme::TEXT_MUTED,
 };
 use eframe::{egui, egui_wgpu, wgpu};
 use glam::{Mat4, Vec3};
@@ -23,7 +25,7 @@ struct Light {
 
 struct Scene {
     view_proj: mat4x4<f32>,
-    camera_pos: vec4<f32>,
+    camera_pos: vec4<f32>, // w = 1 to draw the floor grid
     ambient: vec4<f32>,    // rgb, w = number of lights
     sun: vec4<f32>,        // direction, w = strength
     lights: array<Light, 32>,
@@ -87,8 +89,20 @@ fn wood(world: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     return base * tone * grain * streak * joint;
 }
 
+// 1 on a grid line of the given spacing (meters), fading out where lines would crowd.
+fn grid_line(coord: vec2<f32>, fw: vec2<f32>, spacing: f32) -> f32 {
+    let c = coord / spacing;
+    let w = max(fw / spacing, vec2<f32>(1e-5, 1e-5));
+    let d = abs(fract(c - 0.5) - 0.5) / w;
+    let line = 1.0 - min(min(d.x, d.y), 1.0);
+    let density = max(w.x, w.y);
+    return line * clamp(1.0 - (density - 0.12) / 0.2, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Derivatives must be taken in uniform control flow, before any branching.
+    let fw = fwidth(in.world.xz);
     // Two-sided surfaces: light the side facing the camera.
     var n = normalize(in.normal);
     if (dot(n, scene.camera_pos.xyz - in.world) < 0.0) {
@@ -118,6 +132,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var albedo = in.color;
     if (in.material > 0.5) {
         albedo = wood(in.world, in.color);
+    }
+    // Grid on the floor and ground: 10 cm squares, a stronger line every meter.
+    if (scene.camera_pos.w > 0.5 && abs(in.world.y) < 0.02) {
+        let minor = grid_line(in.world.xz, fw, 0.1);
+        let major = grid_line(in.world.xz, fw, 1.0);
+        albedo = albedo * (1.0 - 0.07 * minor) * (1.0 - 0.16 * major);
     }
     let color = albedo * light + albedo * in.emissive;
     return vec4<f32>(min(color, vec3<f32>(1.0)), 1.0);
@@ -334,6 +354,8 @@ struct MeshBuilder {
     indices: Vec<u32>,
     /// Material of the vertices being added, see `Vertex::material`.
     material: f32,
+    /// Color for the top faces of boxes, e.g. cut walls drawn dark like on a plan.
+    top_color: Option<[f32; 3]>,
 }
 
 impl MeshBuilder {
@@ -400,6 +422,11 @@ impl MeshBuilder {
         ];
         for (corners, normal) in faces {
             let base = self.vertices.len() as u32;
+            let color = if normal == Vec3::Y {
+                self.top_color.unwrap_or(color)
+            } else {
+                color
+            };
             for corner in corners {
                 self.vertex(corner, normal, color, emissive);
             }
@@ -409,7 +436,7 @@ impl MeshBuilder {
     }
 
     /// A wall of real thickness with holes for its windows and doors.
-    fn wall(&mut self, wall: &Wall, height: f32, color: [f32; 3]) {
+    fn wall(&mut self, wall: &Wall, height: f32, color: [f32; 3], top: Option<[f32; 3]>) {
         let a = egui::vec2(wall.start.x, wall.start.y) / PIXELS_PER_METER;
         let b = egui::vec2(wall.end.x, wall.end.y) / PIXELS_PER_METER;
         let length = (b - a).length();
@@ -421,6 +448,7 @@ impl MeshBuilder {
         let half = WALL_THICKNESS / 2.0;
         // Wall pieces between `from` and `to` meters along the wall (ends extended so corners close).
         let mut piece = |builder: &mut Self, from: f32, to: f32, y0: f32, y1: f32| {
+            builder.top_color = if y1 >= height { top } else { None };
             builder.oriented_box(
                 a + dir * from - across * half,
                 dir,
@@ -431,6 +459,7 @@ impl MeshBuilder {
                 color,
                 0.0,
             );
+            builder.top_color = None;
         };
 
         let mut openings: Vec<(f32, f32, &Opening)> = wall
@@ -709,117 +738,198 @@ fn lighting(time: TimeOfDay) -> Lighting {
     }
 }
 
-// --- 5. THE PANEL ---
+// --- 5. CAMERA ---
 
-pub fn show_panel(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
-    egui::Panel::right("view3d_panel")
-        .resizable(true)
-        .default_size((ui.available_width() * 0.36).clamp(260.0, 720.0))
-        .size_range(220.0..=1200.0)
-        .show_inside(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("3D");
-                ui.add_space(4.0);
-                let before = app.camera_mode;
-                ui.selectable_value(&mut app.camera_mode, CameraMode::Orbit, "🌐 Overview")
-                    .on_hover_text("Look at the whole home from above");
-                ui.selectable_value(&mut app.camera_mode, CameraMode::Walk, "🚶 Walk")
-                    .on_hover_text("Stand in the room. Drag the person on the plan to move.");
-                if before != app.camera_mode && app.camera_mode == CameraMode::Walk {
-                    if !app.visible_world_rect.contains(app.camera_pos) {
-                        app.camera_pos = app.visible_world_rect.center();
-                    }
-                }
-                ui.separator();
-                ui.selectable_value(&mut app.time_of_day, TimeOfDay::Day, "☀ Day");
-                ui.selectable_value(&mut app.time_of_day, TimeOfDay::Evening, "🌆 Evening");
-                ui.selectable_value(&mut app.time_of_day, TimeOfDay::Night, "🌙 Night");
-                if app.camera_mode == CameraMode::Orbit {
-                    ui.separator();
-                    ui.checkbox(&mut app.cut_walls, "Cut walls");
-                    if ui.button("⛶").on_hover_text("Fit the whole plan").clicked() {
-                        fit_orbit(app);
-                    }
-                }
-            });
-            let hint = match app.camera_mode {
-                CameraMode::Orbit => {
-                    "Drag to rotate · right-drag or Shift+drag to pan · scroll to zoom"
-                }
-                CameraMode::Walk => {
-                    "Drag to look around · right-drag to step · scroll or arrow keys to walk"
-                }
-            };
-            ui.label(egui::RichText::new(hint).small().color(TEXT_MUTED));
-            ui.add_space(2.0);
-
-            let (rect, response) =
-                ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-            handle_camera_input(app, ui, &response);
-            draw_scene(app, ui, rect);
-        });
+/// Builds this frame's projection for the viewport from the camera settings.
+pub fn update_projection(app: &mut RoomPlannerApp, rect: egui::Rect) {
+    let aspect = rect.width() / rect.height().max(1.0);
+    app.view3d_aspect = aspect;
+    let (view_proj, eye) = match app.camera_mode {
+        CameraMode::Top => {
+            // Orthographic, straight down, matching the plan's pan and zoom exactly:
+            // screen = plan * zoom + pan_offset.
+            let (hw, hh) = (rect.width() / 2.0, rect.height().max(1.0) / 2.0);
+            let k = PIXELS_PER_METER * app.zoom_factor;
+            let (depth_top, depth_bottom) = (20.0, -1.0);
+            let span = depth_top - depth_bottom;
+            let m = Mat4::from_cols(
+                glam::Vec4::new(k / hw, 0.0, 0.0, 0.0),
+                glam::Vec4::new(0.0, 0.0, -1.0 / span, 0.0),
+                glam::Vec4::new(0.0, -k / hh, 0.0, 0.0),
+                glam::Vec4::new(
+                    (app.pan_offset.x - rect.center().x) / hw,
+                    -(app.pan_offset.y - rect.center().y) / hh,
+                    depth_top / span,
+                    1.0,
+                ),
+            );
+            let center = (rect.center().to_vec2() - app.pan_offset) / k;
+            (m, Vec3::new(center.x, 50.0, center.y))
+        }
+        CameraMode::Orbit => {
+            let target = orbit_target(app);
+            let offset = Vec3::new(
+                app.orbit_pitch.cos() * app.orbit_yaw.cos(),
+                app.orbit_pitch.sin(),
+                app.orbit_pitch.cos() * app.orbit_yaw.sin(),
+            ) * app.orbit_distance;
+            let eye = target + offset;
+            let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+            let proj = Mat4::perspective_rh(50.0_f32.to_radians(), aspect, 0.05, 300.0);
+            (proj * view, eye)
+        }
+        CameraMode::Walk => {
+            let eye = Vec3::new(
+                app.camera_pos.x / PIXELS_PER_METER,
+                EYE_HEIGHT,
+                app.camera_pos.y / PIXELS_PER_METER,
+            );
+            let (yaw, pitch) = (app.camera_angle, app.camera_pitch);
+            let dir = Vec3::new(
+                pitch.cos() * yaw.cos(),
+                pitch.sin(),
+                pitch.cos() * yaw.sin(),
+            );
+            let view = Mat4::look_at_rh(eye, eye + dir, Vec3::Y);
+            let proj = Mat4::perspective_rh(65.0_f32.to_radians(), aspect, 0.05, 300.0);
+            (proj * view, eye)
+        }
+    };
+    app.projection = Projection {
+        rect,
+        view_proj,
+        inverse: view_proj.inverse(),
+        eye,
+    };
 }
 
-fn handle_camera_input(app: &mut RoomPlannerApp, ui: &egui::Ui, response: &egui::Response) {
+fn orbit_target(app: &RoomPlannerApp) -> Vec3 {
+    plan_center(app) + Vec3::new(app.orbit_pan.x, 0.0, app.orbit_pan.y)
+}
+
+/// Mouse and keyboard navigation for the current camera. Returns true while the pointer
+/// is used to move the camera, so editing tools leave it alone.
+pub fn handle_camera_input(
+    app: &mut RoomPlannerApp,
+    ui: &egui::Ui,
+    response: &egui::Response,
+) -> bool {
+    let ctx = ui.ctx();
+    let typing = ctx.egui_wants_keyboard_input();
     let drag = response.drag_delta();
-    let scroll = if response.contains_pointer() {
-        ui.ctx().input(|i| i.smooth_scroll_delta.y)
+    let (scroll, zoom, shift, space) = if response.contains_pointer() {
+        ctx.input(|i| {
+            (
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.modifiers.shift,
+                !typing && i.key_down(egui::Key::Space),
+            )
+        })
     } else {
-        0.0
+        (egui::Vec2::ZERO, 1.0, false, false)
     };
-    if response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    }
-
-    // Right, middle or Shift+drag pans; a plain drag rotates or looks around.
-    let panning = response.dragged_by(egui::PointerButton::Secondary)
-        || response.dragged_by(egui::PointerButton::Middle)
-        || (response.dragged() && ui.ctx().input(|i| i.modifiers.shift));
-    let zoom = ui.ctx().input(|i| i.zoom_delta());
-
-    match app.camera_mode {
-        CameraMode::Orbit => {
-            if panning {
-                // Move the target along the ground so the scene follows the mouse.
-                let forward = -egui::vec2(app.orbit_yaw.cos(), app.orbit_yaw.sin());
-                let right = egui::vec2(-forward.y, forward.x);
-                let speed = app.orbit_distance * 0.0016;
-                app.orbit_pan += (-right * drag.x + forward * drag.y) * speed;
-            } else {
-                app.orbit_yaw += drag.x * 0.008;
-                app.orbit_pitch = (app.orbit_pitch + drag.y * 0.006).clamp(0.08, 1.5);
+    // Trackpads report smooth scrolling in points, mouse wheels in lines. Remember the last
+    // one seen so the eased tail of a wheel scroll keeps its meaning.
+    // Raw trackpad movement too: egui turns Shift+scroll into sideways-only scrolling.
+    let mut raw_scroll = egui::Vec2::ZERO;
+    if response.contains_pointer() {
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::MouseWheel { unit, delta, .. } = event {
+                    app.trackpad_scroll = *unit == egui::MouseWheelUnit::Point;
+                    if app.trackpad_scroll {
+                        raw_scroll += *delta;
+                    }
+                }
             }
-            app.orbit_distance =
-                (app.orbit_distance * (-scroll * 0.002).exp() / zoom).clamp(1.5, 80.0);
+        });
+    }
+    let trackpad = app.trackpad_scroll;
+    let right = response.dragged_by(egui::PointerButton::Secondary);
+    let middle = response.dragged_by(egui::PointerButton::Middle);
+    let left = response.dragged_by(egui::PointerButton::Primary);
+
+    let navigating = match app.camera_mode {
+        CameraMode::Top => {
+            let mut zoom = zoom;
+            // Wheel zooms; two-finger scroll pans (pinch zooms) unless asked otherwise.
+            if !trackpad || app.scroll_zooms {
+                zoom *= 1.0 + scroll.y * 0.002;
+            } else {
+                app.pan_offset += scroll;
+            }
+            if zoom != 1.0 {
+                if let Some(mouse_pos) = response.hover_pos() {
+                    app.zoom_at(mouse_pos, zoom);
+                }
+            }
+            let panning = right || middle || (left && space);
+            if panning {
+                app.pan_offset += drag;
+            }
+            panning
+        }
+        CameraMode::Orbit => {
+            let pan = middle || (right && shift) || (left && space && shift);
+            let orbit = !pan && (right || (left && space));
+            if pan {
+                // Move the target along the ground so the floor follows the mouse.
+                let moved = app.world_drag_delta(response) / PIXELS_PER_METER;
+                app.orbit_pan -= moved;
+            } else if orbit {
+                app.orbit_yaw += drag.x * 0.008;
+                app.orbit_pitch = (app.orbit_pitch + drag.y * 0.006).clamp(0.08, 1.55);
+            }
+            let mut wheel = 0.0;
+            if trackpad {
+                // Two fingers rotate the view, with Shift they slide it; pinch zooms.
+                if shift {
+                    // Slide the floor with the fingers, like a drag.
+                    let at = response.hover_pos().unwrap_or(response.rect.center());
+                    let moved = app.screen_to_world(at + raw_scroll) - app.screen_to_world(at);
+                    app.orbit_pan -= moved / PIXELS_PER_METER;
+                } else {
+                    app.orbit_yaw += scroll.x * 0.006;
+                    app.orbit_pitch = (app.orbit_pitch + scroll.y * 0.005).clamp(0.08, 1.55);
+                }
+            } else {
+                wheel = scroll.y;
+            }
+            if wheel != 0.0 || zoom != 1.0 {
+                app.orbit_distance =
+                    (app.orbit_distance * (-wheel * 0.002).exp() / zoom).clamp(1.0, 80.0);
+            }
+            pan || orbit
         }
         CameraMode::Walk => {
             let dir = egui::vec2(app.camera_angle.cos(), app.camera_angle.sin());
-            if panning {
+            if right || middle {
                 // Step: drag up to walk forward, sideways to step aside.
-                let right = egui::vec2(-dir.y, dir.x);
-                app.camera_pos += (right * drag.x - dir * drag.y) * 0.012 * PIXELS_PER_METER;
-            } else {
+                let side = egui::vec2(-dir.y, dir.x);
+                app.camera_pos += (side * drag.x - dir * drag.y) * 0.012 * PIXELS_PER_METER;
+            } else if left {
                 app.camera_angle += drag.x * 0.005;
                 app.camera_pitch = (app.camera_pitch - drag.y * 0.005).clamp(-1.3, 1.3);
             }
-            app.camera_pos += dir * scroll * 0.008 * PIXELS_PER_METER;
+            app.camera_pos += dir * scroll.y * 0.008 * PIXELS_PER_METER;
+            if trackpad {
+                app.camera_angle -= scroll.x * 0.004;
+            }
 
-            if !ui.ctx().egui_wants_keyboard_input() {
-                let (dt, keys) = ui.ctx().input(|i| {
+            if !typing {
+                let (dt, keys) = ctx.input(|i| {
                     (
                         i.stable_dt.min(0.1),
                         [
-                            i.key_down(egui::Key::ArrowUp),
-                            i.key_down(egui::Key::ArrowDown),
-                            i.key_down(egui::Key::ArrowLeft),
-                            i.key_down(egui::Key::ArrowRight),
+                            i.key_down(egui::Key::ArrowUp) || i.key_down(egui::Key::W),
+                            i.key_down(egui::Key::ArrowDown) || i.key_down(egui::Key::S),
+                            i.key_down(egui::Key::ArrowLeft) || i.key_down(egui::Key::A),
+                            i.key_down(egui::Key::ArrowRight) || i.key_down(egui::Key::D),
                         ],
                     )
                 });
-                let [up, down, left, right] = keys;
+                let [up, down, turn_left, turn_right] = keys;
                 let speed = 1.8 * PIXELS_PER_METER * dt;
                 if up {
                     app.camera_pos += dir * speed;
@@ -827,27 +937,129 @@ fn handle_camera_input(app: &mut RoomPlannerApp, ui: &egui::Ui, response: &egui:
                 if down {
                     app.camera_pos -= dir * speed;
                 }
-                if left {
+                if turn_left {
                     app.camera_angle -= 1.8 * dt;
                 }
-                if right {
+                if turn_right {
                     app.camera_angle += 1.8 * dt;
                 }
                 if keys.iter().any(|&k| k) {
-                    ui.ctx().request_repaint();
+                    ctx.request_repaint();
                 }
             }
+            response.dragged()
+        }
+    };
+    if navigating {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    navigating
+}
+
+/// Where to stand when walking starts: open floor inside a room, near `near`, clear of walls
+/// and furniture. Returns the spot and a direction to look in (radians, like
+/// `camera_angle`): `facing` if there is room to see that way, otherwise the most open one.
+pub fn walk_start(app: &RoomPlannerApp, near: egui::Pos2, facing: f32) -> (egui::Pos2, f32) {
+    use crate::geometry::math::{closest_point_on_segment, ray_segment_distance};
+    // Things that block you: walls, and furniture you can't see over or step on.
+    let mut segments: Vec<(egui::Pos2, egui::Pos2)> =
+        app.walls.iter().map(|w| (w.start, w.end)).collect();
+    let mut footprints = Vec::new();
+    for item in &app.furniture {
+        if item.elevation < 1.5 && item.elevation + item.height > 0.15 {
+            let corners = item.footprint();
+            for k in 0..corners.len() {
+                segments.push((corners[k], corners[(k + 1) % corners.len()]));
+            }
+            footprints.push(corners);
         }
     }
+    let clearance = |p: egui::Pos2| {
+        if footprints.iter().any(|f| point_in_polygon(p, f)) {
+            return 0.0;
+        }
+        segments
+            .iter()
+            .map(|&(a, b)| closest_point_on_segment(p, a, b).distance(p))
+            .fold(f32::INFINITY, f32::min)
+            / PIXELS_PER_METER
+    };
+
+    let wanted = 0.7; // meters of space around you
+    let mut best = (f32::NEG_INFINITY, near);
+    let step = 0.25 * PIXELS_PER_METER;
+    for room in &app.rooms {
+        let mut bounds = egui::Rect::NOTHING;
+        for &p in room {
+            bounds.extend_with(p);
+        }
+        let mut y = bounds.min.y + step / 2.0;
+        while y < bounds.max.y {
+            let mut x = bounds.min.x + step / 2.0;
+            while x < bounds.max.x {
+                let p = egui::pos2(x, y);
+                if point_in_polygon(p, room) {
+                    // Enough space matters most; after that, stay close to where you looked.
+                    let score =
+                        clearance(p).min(wanted) * 10.0 - p.distance(near) / PIXELS_PER_METER;
+                    if score > best.0 {
+                        best = (score, p);
+                    }
+                }
+                x += step;
+            }
+            y += step;
+        }
+    }
+    let spot = best.1;
+
+    // How far you can see along the floor in a direction, in meters.
+    let view = |angle: f32| {
+        let dir = egui::vec2(angle.cos(), angle.sin());
+        segments
+            .iter()
+            .filter_map(|&(a, b)| ray_segment_distance(spot, dir, a, b))
+            .fold(20.0 * PIXELS_PER_METER, f32::min)
+            / PIXELS_PER_METER
+    };
+    // Averaged across the field of view, so a room beats a narrow doorway.
+    let open = |angle: f32| {
+        (-6..=6)
+            .map(|k| view(angle + (k as f32 * 5.0).to_radians()))
+            .sum::<f32>()
+            / 13.0
+    };
+    let angle = if open(facing) >= 2.0 {
+        facing
+    } else {
+        (0..32)
+            .map(|k| k as f32 / 32.0 * std::f32::consts::TAU)
+            .max_by(|&a, &b| open(a).total_cmp(&open(b)))
+            .unwrap_or(facing)
+    };
+    (spot, angle)
+}
+
+fn point_in_polygon(p: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
+    let mut inside = false;
+    let mut j = polygon.len().saturating_sub(1);
+    for i in 0..polygon.len() {
+        let (a, b) = (polygon[i], polygon[j]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Center of everything in the plan, in 3D meters.
-fn plan_center(app: &RoomPlannerApp) -> Vec3 {
+pub fn plan_center(app: &RoomPlannerApp) -> Vec3 {
     let bounds = plan_bounds(app);
     let c = if bounds.is_positive() {
         bounds.center()
     } else {
-        app.visible_world_rect.center()
+        egui::Pos2::ZERO
     };
     Vec3::new(c.x / PIXELS_PER_METER, 0.8, c.y / PIXELS_PER_METER)
 }
@@ -864,7 +1076,7 @@ fn plan_bounds(app: &RoomPlannerApp) -> egui::Rect {
     bounds
 }
 
-/// Sets the overview camera distance so the whole plan is in view.
+/// Sets the overview camera so the whole plan is in view.
 pub fn fit_orbit(app: &mut RoomPlannerApp) {
     app.orbit_pan = egui::Vec2::ZERO;
     let bounds = plan_bounds(app);
@@ -872,44 +1084,156 @@ pub fn fit_orbit(app: &mut RoomPlannerApp) {
         let extent = bounds.size().max_elem() / PIXELS_PER_METER;
         // A tall, narrow view needs to back off further to fit the plan's width.
         let narrow = (1.0 / app.view3d_aspect.max(0.1)).max(1.0);
-        app.orbit_distance = (extent * 1.1 * narrow + 2.0).clamp(1.5, 80.0);
+        app.orbit_distance = (extent * 1.25 * narrow + 2.0).clamp(1.5, 80.0);
     }
 }
 
-fn draw_scene(app: &mut RoomPlannerApp, ui: &mut egui::Ui, rect: egui::Rect) {
-    let env = lighting(app.time_of_day);
-    ui.painter().rect_filled(rect, 6.0, env.sky);
+/// Height walls are drawn at with the current camera.
+pub fn shown_wall_height(app: &RoomPlannerApp, wall: &Wall) -> f32 {
+    if app.camera_mode == CameraMode::Orbit && app.cut_walls {
+        wall.height.min(CUT_WALL_HEIGHT)
+    } else {
+        wall.height
+    }
+}
 
-    let aspect = rect.width() / rect.height().max(1.0);
-    app.view3d_aspect = aspect;
-    let (eye, target) = match app.camera_mode {
-        CameraMode::Orbit => {
-            let target = plan_center(app);
-            let offset = Vec3::new(
-                app.orbit_pitch.cos() * app.orbit_yaw.cos(),
-                app.orbit_pitch.sin(),
-                app.orbit_pitch.cos() * app.orbit_yaw.sin(),
-            ) * app.orbit_distance;
-            let target = target + Vec3::new(app.orbit_pan.x, 0.0, app.orbit_pan.y);
-            (target + offset, target)
-        }
-        CameraMode::Walk => {
-            let eye = Vec3::new(
-                app.camera_pos.x / PIXELS_PER_METER,
-                EYE_HEIGHT,
-                app.camera_pos.y / PIXELS_PER_METER,
-            );
-            let (yaw, pitch) = (app.camera_angle, app.camera_pitch);
-            let dir = Vec3::new(
-                pitch.cos() * yaw.cos(),
-                pitch.sin(),
-                pitch.cos() * yaw.sin(),
-            );
-            (eye, eye + dir)
-        }
+/// The plan position of whatever is under a screen point: a wall or piece of furniture if
+/// the ray hits one, otherwise the floor. In the top view this is just the floor point.
+pub fn pick(app: &RoomPlannerApp, screen: egui::Pos2) -> egui::Pos2 {
+    pick_with_furniture(app, screen).0
+}
+
+/// Like [`pick`], and also the piece of furniture when that is what the ray hits first.
+/// Needed because a piece standing against a wall is within reach of that wall on the plan.
+pub fn pick_with_furniture(
+    app: &RoomPlannerApp,
+    screen: egui::Pos2,
+) -> (egui::Pos2, Option<usize>) {
+    let floor = app.screen_to_world(screen);
+    if app.camera_mode == CameraMode::Top {
+        return (floor, None);
+    }
+    let mut hit_furniture = None;
+    let (o, d) = app.projection.ray(screen);
+    let mut best = if d.y < -1e-4 {
+        -o.y / d.y
+    } else {
+        f32::INFINITY
     };
-    let view = Mat4::look_at_rh(eye, target, Vec3::Y);
-    let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.05, 300.0);
+    let mut hit_point = None;
+
+    for wall in &app.walls {
+        let a = egui::vec2(wall.start.x, wall.start.y) / PIXELS_PER_METER;
+        let b = egui::vec2(wall.end.x, wall.end.y) / PIXELS_PER_METER;
+        let length = (b - a).length();
+        if length < 1e-4 {
+            continue;
+        }
+        let dir = (b - a) / length;
+        let n = dir.rot90();
+        let h = shown_wall_height(app, wall);
+        let half = WALL_THICKNESS / 2.0;
+        // The two faces and the top.
+        let dn = n.x * d.x + n.y * d.z;
+        for side in [-half, half] {
+            if dn.abs() < 1e-6 {
+                continue;
+            }
+            let rel = a + n * side - egui::vec2(o.x, o.z);
+            let t = (rel.x * n.x + rel.y * n.y) / dn;
+            if t <= 0.0 || t >= best {
+                continue;
+            }
+            let p = o + d * t;
+            let u = (egui::vec2(p.x, p.z) - a).dot(dir);
+            if (-half..=length + half).contains(&u) && (0.0..=h).contains(&p.y) {
+                best = t;
+                hit_point = Some(a + dir * u);
+            }
+        }
+        if d.y.abs() > 1e-6 {
+            let t = (h - o.y) / d.y;
+            if t > 0.0 && t < best {
+                let p = o + d * t;
+                let rel = egui::vec2(p.x, p.z) - a;
+                let u = rel.dot(dir);
+                if (-half..=length + half).contains(&u) && rel.dot(n).abs() <= half {
+                    best = t;
+                    hit_point = Some(a + dir * u);
+                }
+            }
+        }
+    }
+
+    for (index, item) in app.furniture.iter().enumerate() {
+        // Slab test in the piece's own frame.
+        let origin = item.world_to_local(egui::pos2(o.x, o.z) * PIXELS_PER_METER);
+        let rot = egui::emath::Rot2::from_angle(-item.rotation);
+        let dir = rot * egui::vec2(d.x, d.z);
+        let lo = Vec3::new(-item.width / 2.0, item.elevation, -item.depth / 2.0);
+        let hi = Vec3::new(
+            item.width / 2.0,
+            item.elevation + item.height,
+            item.depth / 2.0,
+        );
+        let (ro, rd) = (
+            Vec3::new(origin.x, o.y, origin.y),
+            Vec3::new(dir.x, d.y, dir.y),
+        );
+        let mut t0: f32 = 0.0;
+        let mut t1 = best;
+        for axis in 0..3 {
+            if rd[axis].abs() < 1e-8 {
+                if ro[axis] < lo[axis] || ro[axis] > hi[axis] {
+                    t1 = -1.0;
+                }
+                continue;
+            }
+            let (mut ta, mut tb) = (
+                (lo[axis] - ro[axis]) / rd[axis],
+                (hi[axis] - ro[axis]) / rd[axis],
+            );
+            if ta > tb {
+                std::mem::swap(&mut ta, &mut tb);
+            }
+            t0 = t0.max(ta);
+            t1 = t1.min(tb);
+        }
+        if t0 <= t1 && t1 > 0.0 && t0 < best {
+            best = t0;
+            // Aim at the piece's middle so it is found even when hit on its edge.
+            let p = o + d * t0;
+            let inside = item.world_to_local(egui::pos2(p.x, p.z) * PIXELS_PER_METER);
+            let clamped = egui::vec2(
+                inside.x.clamp(-item.width * 0.45, item.width * 0.45),
+                inside.y.clamp(-item.depth * 0.45, item.depth * 0.45),
+            );
+            let w = item.local_to_world(clamped.x, clamped.y);
+            hit_point = Some(egui::vec2(w.x, w.y) / PIXELS_PER_METER);
+            hit_furniture = Some(index);
+        }
+    }
+
+    match hit_point {
+        Some(p) => (egui::pos2(p.x, p.y) * PIXELS_PER_METER, hit_furniture),
+        None => (floor, None),
+    }
+}
+
+// --- 6. DRAWING ---
+
+/// Renders the scene into `rect`. `preview` is furniture being dragged in from the library;
+/// `hovered_wall` gets a highlight like the selected walls.
+pub fn paint(
+    app: &mut RoomPlannerApp,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    preview: Option<&Furniture>,
+    hovered_wall: Option<usize>,
+) {
+    let env = lighting(app.time_of_day);
+    painter.rect_filled(rect, 0.0, env.sky);
+    let eye = app.projection.eye;
 
     let mut mesh = MeshBuilder::default();
     let walk = app.camera_mode == CameraMode::Walk;
@@ -926,6 +1250,13 @@ fn draw_scene(app: &mut RoomPlannerApp, ui: &mut egui::Ui, rect: egui::Rect) {
         Vec3::Y,
         [0.78, 0.80, 0.76],
     );
+    // The ceiling sits on the tallest wall.
+    let ceiling = app
+        .walls
+        .iter()
+        .map(|w| w.height)
+        .fold(None, |m: Option<f32>, h| Some(m.map_or(h, |m| m.max(h))))
+        .unwrap_or(WALL_HEIGHT);
     for room in &app.rooms {
         mesh.material = if app.finishes.floor.is_wood() {
             1.0
@@ -935,21 +1266,35 @@ fn draw_scene(app: &mut RoomPlannerApp, ui: &mut egui::Ui, rect: egui::Rect) {
         mesh.polygon(room, 0.0, Vec3::Y, srgb(app.finishes.floor.color()));
         mesh.material = 0.0;
         if walk {
-            mesh.polygon(room, WALL_HEIGHT, -Vec3::Y, [0.96, 0.96, 0.95]);
+            mesh.polygon(room, ceiling, -Vec3::Y, [0.96, 0.96, 0.95]);
         }
     }
 
-    let wall_height = if !walk && app.cut_walls {
-        CUT_WALL_HEIGHT
-    } else {
-        WALL_HEIGHT
+    // From above, wall tops are drawn dark like the cut walls on a floor plan.
+    let dark_tops = match app.camera_mode {
+        CameraMode::Top => true,
+        CameraMode::Orbit => app.cut_walls,
+        CameraMode::Walk => false,
     };
-    for wall in &app.walls {
-        mesh.wall(wall, wall_height, srgb(app.finishes.wall_color));
+    let base = srgb(app.finishes.wall_color);
+    for (idx, wall) in app.walls.iter().enumerate() {
+        let tint = if app.selected_walls.contains(&idx) {
+            Some(([0.15, 0.39, 0.92], 0.5))
+        } else if hovered_wall == Some(idx) {
+            Some(([0.47, 0.63, 0.96], 0.35))
+        } else {
+            None
+        };
+        let mix = |c: [f32; 3]| match tint {
+            Some((t, k)) => [0, 1, 2].map(|i| c[i] * (1.0 - k) + t[i] * k),
+            None => c,
+        };
+        let top = dark_tops.then(|| mix([0.30, 0.32, 0.37]));
+        mesh.wall(wall, shown_wall_height(app, wall), mix(base), top);
     }
 
     let mut lights = Vec::new();
-    for item in &app.furniture {
+    for item in app.furniture.iter().chain(preview) {
         if let FurnitureKind::Model { path } = &item.kind {
             match app.models.get(path) {
                 Ok(model) => mesh.model(item, &model),
@@ -982,8 +1327,18 @@ fn draw_scene(app: &mut RoomPlannerApp, ui: &mut egui::Ui, rect: egui::Rect) {
             .total_cmp(&b.0.distance_squared(eye))
     });
     let mut scene = SceneUniform {
-        view_proj: (proj * view).to_cols_array_2d(),
-        camera_pos: [eye.x, eye.y, eye.z, 1.0],
+        view_proj: app.projection.view_proj.to_cols_array_2d(),
+        camera_pos: [
+            eye.x,
+            eye.y,
+            eye.z,
+            // No grid lines on the floor at eye height.
+            if app.show_grid && app.camera_mode != CameraMode::Walk {
+                1.0
+            } else {
+                0.0
+            },
+        ],
         ambient: [
             env.ambient[0],
             env.ambient[1],
@@ -1010,5 +1365,37 @@ fn draw_scene(app: &mut RoomPlannerApp, ui: &mut egui::Ui, rect: egui::Rect) {
             scene,
         },
     );
-    ui.painter().add(callback);
+    painter.add(callback);
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    #[test]
+    fn walking_starts_in_a_room_clear_of_walls_and_furniture() {
+        let mut app = RoomPlannerApp::default();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example_plans/two_bedroom.json");
+        crate::storage::apply_state(&mut app, crate::storage::read_state(&path).unwrap());
+        // Looking from outside the plan and from inside a wall both end up on open floor.
+        for near in [egui::pos2(600.0, 200.0), egui::pos2(250.0, 100.0)] {
+            let (spot, _) = walk_start(&app, near, 0.0);
+            assert!(app.rooms.iter().any(|r| point_in_polygon(spot, r)));
+            for w in &app.walls {
+                let d = crate::geometry::math::closest_point_on_segment(spot, w.start, w.end)
+                    .distance(spot);
+                assert!(d > 0.5 * PIXELS_PER_METER, "{spot:?} is {d} from a wall");
+            }
+            for item in &app.furniture {
+                if item.height > 0.15 {
+                    assert!(
+                        !point_in_polygon(spot, &item.footprint()),
+                        "inside {}",
+                        item.name
+                    );
+                }
+            }
+        }
+    }
 }

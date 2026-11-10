@@ -16,6 +16,13 @@ pub struct Wall {
     /// Windows and doors in this wall; they move and disappear with it.
     #[serde(default)]
     pub openings: Vec<Opening>,
+    /// Height from the floor, in meters.
+    #[serde(default = "default_wall_height")]
+    pub height: f32,
+}
+
+fn default_wall_height() -> f32 {
+    crate::app::WALL_HEIGHT
 }
 
 impl Wall {
@@ -24,6 +31,7 @@ impl Wall {
             start,
             end,
             openings: Vec::new(),
+            height: default_wall_height(),
         }
     }
 
@@ -130,6 +138,18 @@ pub enum FurnitureKind {
         /// Number of horizontal boards, including top and bottom.
         shelves: u32,
     },
+    /// An open grid of square compartments with a thick outer frame and thin dividers.
+    CubeShelf {
+        columns: u32,
+        rows: u32,
+        /// Inner width of each column, left to right. Treated as proportions of the
+        /// available space; empty (or the wrong length) means equal columns.
+        #[serde(default)]
+        column_widths: Vec<f32>,
+        /// Inner height of each row, bottom to top. Same rules as `column_widths`.
+        #[serde(default)]
+        row_heights: Vec<f32>,
+    },
     Plant,
     Lamp {
         style: LampStyle,
@@ -162,6 +182,10 @@ pub struct Furniture {
     #[serde(default)]
     pub elevation: f32,
     pub color: [u8; 3],
+    /// A different color for the top surface, e.g. a countertop on a cabinet.
+    /// Only used by plain boxes.
+    #[serde(default)]
+    pub top_color: Option<[u8; 3]>,
     /// Alternatives to try in this spot. When non-empty it holds every option,
     /// with `options[active_option]` being a (possibly stale) copy of this item.
     #[serde(default)]

@@ -13,22 +13,32 @@ use app::RoomPlannerApp;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         depth_buffer: 32,
+        // A fixed app id (Wayland) / WM_CLASS (X11) and title, for window manager rules.
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_app_id("roomplanner")
+            .with_title("roomplanner"),
         ..Default::default()
     };
 
+    // Also names the folder eframe keeps "My furniture" in, so it stays as it was.
     eframe::run_native(
         "RoomPlanner",
         native_options,
         Box::new(|cc| {
             let mut app = RoomPlannerApp::new(cc);
 
-            if let Ok(data) = std::fs::read_to_string(storage::CONFIG_FILE) {
-                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(path_str) = config.get("last_opened_file").and_then(|v| v.as_str())
-                    {
-                        let path = std::path::PathBuf::from(path_str);
-                        if path.exists() {
-                            storage::load_from_path(&mut app, &path);
+            // The last session's plan, saved or not, comes back by itself; otherwise reopen
+            // the last file.
+            if !app.restored_draft {
+                if let Ok(data) = std::fs::read_to_string(storage::CONFIG_FILE) {
+                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let Some(path_str) =
+                            config.get("last_opened_file").and_then(|v| v.as_str())
+                        {
+                            let path = std::path::PathBuf::from(path_str);
+                            if path.exists() {
+                                storage::load_from_path(&mut app, &path);
+                            }
                         }
                     }
                 }

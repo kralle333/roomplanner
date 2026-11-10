@@ -99,9 +99,13 @@ fn restore(app: &mut RoomPlannerApp) {
     app.rooms = extract_rooms(&app.walls);
     app.selected_walls.clear();
     app.selected_furniture = app.selected_furniture.filter(|&i| i < app.furniture.len());
+    app.extra_furniture.clear();
+    app.furniture_rotate = None;
+    app.furniture_resize = None;
     app.wall_start_point = None;
     app.selected_opening = None;
     app.opening_drag = false;
     app.dragging_endpoints.clear();
+    app.wall_drag = None;
     app.furniture_drag = None;
 }
