@@ -23,6 +23,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &egui::Ui, canvas: egui::Rect) {
     if !has_selection && !drawing {
         return;
     }
+    crate::ui::color::collect_plan_colors(app, ui.ctx());
     // Leave room for the zoom controls in the bottom-right corner.
     let max_height = (canvas.height() - 12.0 - 56.0).max(120.0);
     egui::Area::new(egui::Id::new("properties_panel"))

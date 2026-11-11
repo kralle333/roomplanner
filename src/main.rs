@@ -2,6 +2,7 @@ pub mod app;
 pub mod furniture;
 pub mod geometry;
 pub mod history;
+pub mod layouts;
 pub mod models;
 pub mod storage;
 pub mod tools;

@@ -173,6 +173,85 @@ fn junctions(walls: &[Wall], idx: usize) -> Vec<Junction> {
     found
 }
 
+/// How far (meters) to draw a wall past its start and end so walls meet without
+/// overlapping: overlapping walls have faces in the same plane, which flicker in 3D when
+/// one of them is highlighted. Negative values stop the wall short of its end point.
+///
+/// At a corner the wall with the lowest index runs on to the outer corner and the others
+/// stop at its face. A wall ending partway along another stops at that wall's face, and a
+/// wall continued in a straight line by another stops right at the shared point. A free
+/// end runs on by half the thickness, like before.
+pub fn wall_end_extensions(walls: &[Wall], idx: usize) -> (f32, f32) {
+    let wall = &walls[idx];
+    let (dir, _) = wall_frame(wall);
+    let half = WALL_THICKNESS / 2.0;
+    let near = 2.0; // world units
+    let end = |p: Pos2, inward: Vec2| -> f32 {
+        // (other wall's index, the direction it leaves the point in)
+        let mut corners: Vec<(usize, Vec2)> = Vec::new();
+        let mut through: Option<Vec2> = None;
+        for (j, other) in walls.iter().enumerate() {
+            if j == idx || other.start.distance(other.end) < 1e-3 {
+                continue;
+            }
+            if p.distance(other.start) < near {
+                corners.push((j, (other.end - other.start).normalized()));
+            } else if p.distance(other.end) < near {
+                corners.push((j, (other.start - other.end).normalized()));
+            } else if p.distance(closest_point_on_segment(p, other.start, other.end)) < near {
+                through = Some(wall_frame(other).0);
+            }
+        }
+        // Leaving the same way as this wall: lying on top of it, nothing to join.
+        corners.retain(|(_, d)| d.dot(inward) < 0.98);
+        // Trimmed back to the face of a wall running off at `other`, so that this wall's
+        // nearer edge just meets it.
+        let stop_at = |other: Vec2| {
+            let sin = inward.x * other.y - inward.y * other.x;
+            let cos = inward.dot(other);
+            -half * (1.0 - cos.abs()) / sin.abs().max(0.2)
+        };
+        if corners.iter().any(|(_, d)| d.dot(inward) < -0.98) {
+            0.0
+        } else if let Some(other) = through {
+            stop_at(other)
+        } else if corners.is_empty() {
+            half
+        } else {
+            let owner = corners.iter().map(|c| c.0).min().unwrap_or(idx);
+            if idx < owner {
+                // Reach the outer corner: half a thickness times cot(angle / 2).
+                corners
+                    .iter()
+                    .map(|(_, d)| {
+                        let angle = d.dot(inward).clamp(-1.0, 1.0).acos();
+                        half / (angle / 2.0).tan().max(0.33)
+                    })
+                    .fold(0.0, f32::max)
+            } else {
+                let owner_dir = corners.iter().find(|c| c.0 == owner).map(|c| c.1);
+                owner_dir.map_or(half, stop_at)
+            }
+        }
+    };
+    (end(wall.start, dir), end(wall.end, -dir))
+}
+
+/// The ceiling height at a plan point: the height of the nearest wall, or the usual height
+/// when there are no walls.
+pub fn ceiling_height_at(walls: &[Wall], p: Pos2) -> f32 {
+    walls
+        .iter()
+        .map(|w| {
+            (
+                closest_point_on_segment(p, w.start, w.end).distance(p),
+                w.height,
+            )
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(crate::app::WALL_HEIGHT, |(_, height)| height)
+}
+
 pub fn wall_face(walls: &[Wall], idx: usize, side: f32) -> Face {
     let wall = &walls[idx];
     let (dir, normal) = wall_frame(wall);
@@ -402,6 +481,35 @@ pub fn move_walls(
         }
     }
     walls
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+
+    #[test]
+    fn walls_meet_without_overlapping() {
+        let half = WALL_THICKNESS / 2.0;
+        let walls = vec![
+            // An L corner at (0, 0)…
+            Wall::new(Pos2::new(0.0, 0.0), Pos2::new(200.0, 0.0)),
+            Wall::new(Pos2::new(0.0, 0.0), Pos2::new(0.0, 200.0)),
+            // …a wall ending halfway along the first one…
+            Wall::new(Pos2::new(100.0, 0.0), Pos2::new(100.0, 100.0)),
+            // …and the first one carried on in a straight line.
+            Wall::new(Pos2::new(200.0, 0.0), Pos2::new(300.0, 0.0)),
+        ];
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // The first wall owns the corner, the second stops at its face.
+        assert!(close(wall_end_extensions(&walls, 0).0, half));
+        assert!(close(wall_end_extensions(&walls, 1).0, -half));
+        // Ending on a wall: stop at its face; the far end is free.
+        let (start, end) = wall_end_extensions(&walls, 2);
+        assert!(close(start, -half) && close(end, half), "{start} {end}");
+        // Straight on: both stop at the shared point.
+        assert!(close(wall_end_extensions(&walls, 0).1, 0.0));
+        assert!(close(wall_end_extensions(&walls, 3).0, 0.0));
+    }
 }
 
 #[cfg(test)]

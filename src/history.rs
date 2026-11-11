@@ -1,7 +1,7 @@
 use crate::{
     app::RoomPlannerApp,
     geometry::rooms::extract_rooms,
-    models::{Finishes, Furniture, Wall},
+    models::{Finishes, Furniture, Layout, Wall},
 };
 
 const MAX_STEPS: usize = 200;
@@ -11,14 +11,33 @@ pub struct Snapshot {
     pub walls: Vec<Wall>,
     pub furniture: Vec<Furniture>,
     pub finishes: Finishes,
+    /// The other layouts and which one is shown; see `crate::layouts`.
+    pub layouts: Vec<Layout>,
+    pub active_layout: usize,
 }
 
 impl Snapshot {
     pub fn of(app: &RoomPlannerApp) -> Self {
+        // While peeking at another layout, the plan is as it was before the peek.
+        if let Some(back) = app.peek_return {
+            let mut layouts = crate::layouts::all(app);
+            let back = back.min(layouts.len() - 1);
+            let furniture = std::mem::take(&mut layouts[back].furniture);
+            let finishes = std::mem::take(&mut layouts[back].finishes);
+            return Snapshot {
+                walls: app.walls.clone(),
+                furniture,
+                finishes,
+                layouts,
+                active_layout: back,
+            };
+        }
         Snapshot {
             walls: app.walls.clone(),
             furniture: app.furniture.clone(),
             finishes: app.finishes,
+            layouts: app.layouts.clone(),
+            active_layout: app.active_layout,
         }
     }
 }
@@ -56,13 +75,16 @@ impl History {
 /// Records a step if the plan changed. Call once per frame.
 pub fn track(app: &mut RoomPlannerApp, ctx: &eframe::egui::Context) {
     let busy = ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input();
-    if busy {
+    // A peek at another layout is not a change.
+    if busy || app.peek_return.is_some() {
         return;
     }
     let current = &app.history.current;
     if app.walls == current.walls
         && app.furniture == current.furniture
         && app.finishes == current.finishes
+        && app.layouts == current.layouts
+        && app.active_layout == current.active_layout
     {
         return;
     }
@@ -96,6 +118,13 @@ fn restore(app: &mut RoomPlannerApp) {
     app.walls = snapshot.walls;
     app.furniture = snapshot.furniture;
     app.finishes = snapshot.finishes;
+    app.layouts = snapshot.layouts;
+    app.active_layout = snapshot
+        .active_layout
+        .min(app.layouts.len().saturating_sub(1));
+    app.compare_layout = app
+        .compare_layout
+        .filter(|&i| i < app.layouts.len() && i != app.active_layout);
     app.rooms = extract_rooms(&app.walls);
     app.selected_walls.clear();
     app.selected_furniture = app.selected_furniture.filter(|&i| i < app.furniture.len());

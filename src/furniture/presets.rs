@@ -1,3 +1,4 @@
+use crate::app::WALL_HEIGHT;
 use crate::models::{Furniture, FurnitureKind, LampStyle, ShadeShape};
 use eframe::egui::Pos2;
 
@@ -61,6 +62,7 @@ pub fn make(
         elevation: 0.0,
         color,
         top_color: None,
+        top_wood: false,
         options: Vec::new(),
         active_option: 0,
     }
@@ -90,6 +92,24 @@ fn lamp(style: LampStyle, shade: ShadeShape, shade_height: f32, lumens: f32) -> 
         lumens,
         kelvin: 2700.0,
         on: true,
+        spots: 1,
+        spread: 0.0,
+        tilt: 0.0,
+    }
+}
+
+/// A line of lights: spots on a track or in the ceiling, a bar or a strip.
+fn light_line(style: LampStyle, spots: u32, lumens: f32, kelvin: f32) -> FurnitureKind {
+    FurnitureKind::Lamp {
+        style,
+        shade: ShadeShape::Drum,
+        shade_height: 0.0,
+        lumens,
+        kelvin,
+        on: true,
+        spots,
+        spread: 0.0,
+        tilt: 0.0,
     }
 }
 
@@ -493,6 +513,74 @@ pub const PRESETS: &[Preset] = &[
         },
     },
     Preset {
+        label: "Spot track",
+        category: Category::Lighting,
+        build: || {
+            elevated(
+                make(
+                    "Spot track",
+                    light_line(LampStyle::Track, 4, 400.0, 3000.0),
+                    1.6,
+                    0.08,
+                    0.18,
+                    [40, 40, 42],
+                ),
+                WALL_HEIGHT - 0.18,
+            )
+        },
+    },
+    Preset {
+        label: "Ceiling spots",
+        category: Category::Lighting,
+        build: || {
+            elevated(
+                make(
+                    "Ceiling spots",
+                    light_line(LampStyle::Downlights, 4, 350.0, 3000.0),
+                    2.4,
+                    0.1,
+                    0.02,
+                    [245, 245, 245],
+                ),
+                WALL_HEIGHT - 0.02,
+            )
+        },
+    },
+    Preset {
+        label: "Bar pendant",
+        category: Category::Lighting,
+        build: || {
+            elevated(
+                make(
+                    "Bar pendant",
+                    light_line(LampStyle::LinearPendant, 1, 2400.0, 3000.0),
+                    1.2,
+                    0.07,
+                    0.05,
+                    [40, 40, 42],
+                ),
+                1.75,
+            )
+        },
+    },
+    Preset {
+        label: "LED strip",
+        category: Category::Lighting,
+        build: || {
+            elevated(
+                make(
+                    "LED strip",
+                    light_line(LampStyle::Strip, 1, 600.0, 3000.0),
+                    0.8,
+                    0.03,
+                    0.01,
+                    [210, 210, 210],
+                ),
+                1.4,
+            )
+        },
+    },
+    Preset {
         label: "Wall lamp",
         category: Category::Lighting,
         build: || {
@@ -514,6 +602,20 @@ pub const PRESETS: &[Preset] = &[
         label: "Plant",
         category: Category::Decor,
         build: || make("Plant", FurnitureKind::Plant, 0.5, 0.5, 1.2, [190, 110, 80]),
+    },
+    Preset {
+        label: "Person",
+        category: Category::Decor,
+        build: || {
+            make(
+                "Person",
+                FurnitureKind::Person,
+                0.46,
+                0.26,
+                1.75,
+                [70, 110, 160],
+            )
+        },
     },
     Preset {
         label: "Small plant",

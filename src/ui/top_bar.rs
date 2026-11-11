@@ -113,6 +113,18 @@ fn file_menu(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                 storage::save(app, true);
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .button("Import layouts from file…")
+                .on_hover_text(
+                    "Bring the furniture of other plan files in as layout tabs, to compare. \
+                     Their walls are not used",
+                )
+                .clicked()
+            {
+                storage::import_layouts(app);
+                ui.close();
+            }
         }
     });
 }

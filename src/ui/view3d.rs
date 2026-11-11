@@ -10,7 +10,10 @@ use crate::{
 use eframe::{egui, egui_wgpu, wgpu};
 use glam::{Mat4, Vec3};
 
-const MAX_LIGHTS: usize = 32;
+const MAX_LIGHTS: usize = 64;
+/// Lights nearest the camera that cast shadows, each with its own depth map.
+const MAX_SHADOWS: usize = 8;
+const SHADOW_SIZE: u32 = 1024;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const EYE_HEIGHT: f32 = 1.6;
 /// Wall height in orbit view with "cut walls" on, so you can see into the rooms.
@@ -21,6 +24,8 @@ const SHADER_SOURCE: &str = "
 struct Light {
     position: vec4<f32>,
     color: vec4<f32>,      // rgb premultiplied by intensity, w = range
+    direction: vec4<f32>,  // beam axis; w = cos of the beam's half angle, below -1 for all round
+    shadow: vec4<f32>,     // x = layer of its shadow map, below 0 for none
 };
 
 struct Scene {
@@ -28,9 +33,36 @@ struct Scene {
     camera_pos: vec4<f32>, // w = 1 to draw the floor grid
     ambient: vec4<f32>,    // rgb, w = number of lights
     sun: vec4<f32>,        // direction, w = strength
-    lights: array<Light, 32>,
+    shadow_mats: array<mat4x4<f32>, 8>,
+    lights: array<Light, 64>,
 };
 @group(0) @binding(0) var<uniform> scene: Scene;
+@group(0) @binding(1) var shadow_maps: texture_depth_2d_array;
+@group(0) @binding(2) var shadow_sampler: sampler_comparison;
+
+// How much of a light reaches a point, from that light's shadow map: 1 lit, 0 in shadow.
+// Points outside the map (e.g. above a lamp that looks down) count as lit.
+fn shadow_at(layer: i32, p: vec3<f32>) -> f32 {
+    let c = scene.shadow_mats[layer] * vec4<f32>(p, 1.0);
+    if (c.w <= 0.0) {
+        return 1.0;
+    }
+    let ndc = c.xyz / c.w;
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let texel = 1.0 / 1024.0;
+    var sum = 0.0;
+    // Soft edges: average a few neighbouring samples.
+    for (var x = -1; x <= 1; x++) {
+        for (var y = -1; y <= 1; y++) {
+            let o = vec2<f32>(f32(x), f32(y)) * texel * 1.5;
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + o, layer, ndc.z);
+        }
+    }
+    return sum / 9.0;
+}
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -89,6 +121,30 @@ fn wood(world: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
     return base * tone * grain * streak * joint;
 }
 
+// Solid wood worktop: long glued strips with fine grain running along them, lengthwise at
+// `angle` (radians) on the floor plane, and faint joints between the strips.
+fn worktop(world: vec3<f32>, base: vec3<f32>, angle: f32) -> vec3<f32> {
+    let dir = vec2<f32>(cos(angle), sin(angle));
+    let along = dot(world.xz, dir);
+    let across = dot(world.xz, vec2<f32>(-dir.y, dir.x)) + world.y * 0.37;
+    let strip_width = 0.042;
+    let strip = floor(across / strip_width);
+    let strip_length = 0.9 + 0.6 * hash(vec2<f32>(strip, 5.1));
+    let shifted = along + hash(vec2<f32>(strip, 9.3)) * strip_length;
+    let piece = floor(shifted / strip_length);
+    let id = vec2<f32>(strip, piece);
+
+    let tone = 0.88 + 0.22 * hash(id);
+    let wave = sin(shifted * 1.7 + hash(id) * 30.0) * 0.004;
+    let grain = 0.95 + 0.05 * sin((across + wave) * 520.0 + hash(id + 2.1) * 15.0);
+    let fleck = 0.98 + 0.02 * sin(shifted * 23.0 + across * 140.0);
+    var joint = 1.0;
+    if (fract(across / strip_width) < 0.03 || fract(shifted / strip_length) < 0.003) {
+        joint = 0.9;
+    }
+    return base * tone * grain * fleck * joint;
+}
+
 // 1 on a grid line of the given spacing (meters), fading out where lines would crowd.
 fn grid_line(coord: vec2<f32>, fw: vec2<f32>, spacing: f32) -> f32 {
     let c = coord / spacing;
@@ -125,12 +181,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Wrap lighting so surfaces beside a lamp still catch some light.
             let ndl = max((dot(n, dir) + 0.25) / 1.25, 0.0);
             let window = pow(clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0), 2.0);
-            light += l.color.rgb * ndl * window * 1.4 / (1.0 + dist * dist);
+            // Spots light a soft-edged cone and spill a little outside it.
+            var beam = 1.0;
+            if (l.direction.w > -1.5) {
+                let along = dot(-dir, l.direction.xyz);
+                beam = 0.04 + 0.96 * smoothstep(l.direction.w, min(l.direction.w + 0.12, 1.0), along);
+            }
+            var lit = 1.0;
+            if (l.shadow.x > -0.5) {
+                // Pushed off the surface towards the light, against self-shadowing.
+                var towards = n;
+                if (dot(towards, dir) < 0.0) {
+                    towards = -towards;
+                }
+                lit = shadow_at(i32(l.shadow.x), in.world + towards * 0.02 + dir * 0.01);
+            }
+            light += l.color.rgb * ndl * window * beam * lit * 1.4 / (1.0 + dist * dist);
         }
     }
 
     var albedo = in.color;
-    if (in.material > 0.5) {
+    if (in.material > 1.5) {
+        albedo = worktop(in.world, in.color, (in.material - 2.0) / 0.9 * 3.14159265);
+    } else if (in.material > 0.5) {
         albedo = wood(in.world, in.color);
     }
     // Grid on the floor and ground: 10 cm squares, a stronger line every meter.
@@ -151,7 +224,8 @@ struct Vertex {
     color: [f32; 3],
     normal: [f32; 3],
     emissive: f32,
-    /// 0 = plain color, 1 = wooden floor planks.
+    /// 0 = plain color, 1 = wooden floor planks, 2 to 2.9 = solid wood worktop with the
+    /// grain at (material - 2) / 0.9 × 180° on the floor plane.
     material: f32,
 }
 
@@ -160,6 +234,10 @@ struct Vertex {
 struct GpuLight {
     position: [f32; 4],
     color: [f32; 4],
+    /// Beam axis, w = cos of its half angle; w = -2 shines all round.
+    direction: [f32; 4],
+    /// x = layer of its shadow map, -1 for none.
+    shadow: [f32; 4],
 }
 
 #[repr(C)]
@@ -169,13 +247,33 @@ struct SceneUniform {
     camera_pos: [f32; 4],
     ambient: [f32; 4],
     sun: [f32; 4],
+    shadow_mats: [[[f32; 4]; 4]; MAX_SHADOWS],
     lights: [GpuLight; MAX_LIGHTS],
 }
 
 struct RenderResources {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Renders depth from a light into one layer of `shadow_layers`.
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_bind_group_layout: wgpu::BindGroupLayout,
+    shadow_layers: Vec<wgpu::TextureView>,
+    shadow_array: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
 }
+
+/// Draws only depth, from a light's point of view.
+const SHADOW_SHADER: &str = "
+struct ShadowView {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> shadow_view: ShadowView;
+
+@vertex
+fn vs_shadow(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return shadow_view.view_proj * vec4<f32>(position, 1.0);
+}
+";
 
 struct FrameBuffers {
     vertex_buffer: wgpu::Buffer,
@@ -187,6 +285,11 @@ struct FrameBuffers {
 struct True3dCallback {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
+    /// The triangles that cast shadows: everything but the lamps themselves, which would
+    /// otherwise block their own light.
+    caster_indices: Vec<u32>,
+    /// How many of `scene.shadow_mats` are in use.
+    shadow_count: usize,
     scene: SceneUniform,
 }
 
@@ -203,16 +306,34 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
     });
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ],
         label: Some("scene_bind_group_layout"),
     });
 
@@ -262,6 +383,105 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
         cache: None,
     });
 
+    // Shadow maps: one depth layer per shadow-casting light.
+    let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow_maps"),
+        size: wgpu::Extent3d {
+            width: SHADOW_SIZE,
+            height: SHADOW_SIZE,
+            depth_or_array_layers: MAX_SHADOWS as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let shadow_layers = (0..MAX_SHADOWS as u32)
+        .map(|layer| {
+            shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("shadow_layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let shadow_array = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("shadow_array"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shadow_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    });
+    let shadow_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("shadow_bind_group_layout"),
+        });
+    let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Shadow Shader"),
+        source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+    });
+    let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Shadow Pipeline Layout"),
+        bind_group_layouts: &[Some(&shadow_bind_group_layout)],
+        immediate_size: 0,
+    });
+    let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Shadow Pipeline"),
+        layout: Some(&shadow_layout),
+        vertex: wgpu::VertexState {
+            module: &shadow_shader,
+            entry_point: Some("vs_shadow"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            }],
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            // Against surfaces shadowing themselves.
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
     render_state
         .renderer
         .write()
@@ -269,6 +489,11 @@ pub fn init(render_state: &egui_wgpu::RenderState) {
         .insert(RenderResources {
             pipeline,
             bind_group_layout,
+            shadow_pipeline,
+            shadow_bind_group_layout,
+            shadow_layers,
+            shadow_array,
+            shadow_sampler,
         });
 }
 
@@ -278,7 +503,7 @@ impl egui_wgpu::CallbackTrait for True3dCallback {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _egui_encoder: &mut wgpu::CommandEncoder,
+        egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(render_resources) = resources.get::<RenderResources>() else {
@@ -304,12 +529,66 @@ impl egui_wgpu::CallbackTrait for True3dCallback {
             contents: bytemuck::cast_slice(&[self.scene]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        // Depth from each shadow-casting light, before the scene is drawn.
+        if !self.caster_indices.is_empty() {
+            let caster_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Shadow Caster Index Buffer"),
+                contents: bytemuck::cast_slice(&self.caster_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            for layer in 0..self.shadow_count.min(MAX_SHADOWS) {
+                let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Shadow View Buffer"),
+                    contents: bytemuck::cast_slice(&self.scene.shadow_mats[layer]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let view_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &render_resources.shadow_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: view_buffer.as_entire_binding(),
+                    }],
+                    label: Some("shadow_view_bind_group"),
+                });
+                let mut pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow Pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &render_resources.shadow_layers[layer],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&render_resources.shadow_pipeline);
+                pass.set_bind_group(0, &view_group, &[]);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(caster_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.caster_indices.len() as u32, 0, 0..1);
+            }
+        }
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &render_resources.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: scene_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scene_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&render_resources.shadow_array),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&render_resources.shadow_sampler),
+                },
+            ],
             label: Some("scene_bind_group"),
         });
 
@@ -436,7 +715,15 @@ impl MeshBuilder {
     }
 
     /// A wall of real thickness with holes for its windows and doors.
-    fn wall(&mut self, wall: &Wall, height: f32, color: [f32; 3], top: Option<[f32; 3]>) {
+    /// `ends`: how far to draw past the start and end, see `wall_end_extensions`.
+    fn wall(
+        &mut self,
+        wall: &Wall,
+        ends: (f32, f32),
+        height: f32,
+        color: [f32; 3],
+        top: Option<[f32; 3]>,
+    ) {
         let a = egui::vec2(wall.start.x, wall.start.y) / PIXELS_PER_METER;
         let b = egui::vec2(wall.end.x, wall.end.y) / PIXELS_PER_METER;
         let length = (b - a).length();
@@ -472,7 +759,7 @@ impl MeshBuilder {
             .collect();
         openings.sort_by(|x, y| x.0.total_cmp(&y.0));
 
-        let mut cursor = -half;
+        let mut cursor = -ends.0;
         for (from, to, opening) in openings {
             let from = from.max(cursor);
             if to <= from {
@@ -490,7 +777,7 @@ impl MeshBuilder {
             self.opening(a, dir, from, to, opening, height);
             cursor = to;
         }
-        piece(self, cursor, length + half, 0.0, height);
+        piece(self, cursor, length + ends.1, 0.0, height);
     }
 
     /// Frame and glass, or an open door leaf, filling an opening between `from` and `to`.
@@ -654,20 +941,25 @@ impl MeshBuilder {
 
     /// Adds tessellated furniture parts, moved into place.
     fn furniture(&mut self, item: &Furniture, parts: &[Part]) {
-        let mut local = LocalMesh::default();
+        // Wooden parts carry the grain direction: along the piece's width, as an angle in
+        // [0, π) packed into the material number (see `worktop` in the shader).
+        let grain = item.rotation.rem_euclid(std::f32::consts::PI) / std::f32::consts::PI;
         for part in parts {
+            let mut local = LocalMesh::default();
             local.add_part(part, 28);
+            self.material = if part.wood { 2.0 + grain * 0.9 } else { 0.0 };
+            let base = self.vertices.len() as u32;
+            for i in 0..local.positions.len() {
+                self.vertex(
+                    local_to_3d(item, local.positions[i]),
+                    local_normal_to_3d(item, local.normals[i]),
+                    local.colors[i],
+                    local.emissive[i],
+                );
+            }
+            self.indices.extend(local.indices.iter().map(|i| base + i));
         }
-        let base = self.vertices.len() as u32;
-        for i in 0..local.positions.len() {
-            self.vertex(
-                local_to_3d(item, local.positions[i]),
-                local_normal_to_3d(item, local.normals[i]),
-                local.colors[i],
-                local.emissive[i],
-            );
-        }
-        self.indices.extend(local.indices.iter().map(|i| base + i));
+        self.material = 0.0;
     }
 
     fn model(&mut self, item: &Furniture, mesh: &ModelMesh) {
@@ -804,7 +1096,7 @@ pub fn update_projection(app: &mut RoomPlannerApp, rect: egui::Rect) {
 }
 
 fn orbit_target(app: &RoomPlannerApp) -> Vec3 {
-    plan_center(app) + Vec3::new(app.orbit_pan.x, 0.0, app.orbit_pan.y)
+    Vec3::new(app.orbit_pan.x, 0.8, app.orbit_pan.y)
 }
 
 /// Mouse and keyboard navigation for the current camera. Returns true while the pointer
@@ -1078,7 +1370,8 @@ fn plan_bounds(app: &RoomPlannerApp) -> egui::Rect {
 
 /// Sets the overview camera so the whole plan is in view.
 pub fn fit_orbit(app: &mut RoomPlannerApp) {
-    app.orbit_pan = egui::Vec2::ZERO;
+    let center = plan_center(app);
+    app.orbit_pan = egui::vec2(center.x, center.z);
     let bounds = plan_bounds(app);
     if bounds.is_positive() {
         let extent = bounds.size().max_elem() / PIXELS_PER_METER;
@@ -1103,15 +1396,21 @@ pub fn pick(app: &RoomPlannerApp, screen: egui::Pos2) -> egui::Pos2 {
     pick_with_furniture(app, screen).0
 }
 
+/// Height in meters of the point under a screen position: on the wall or piece the ray
+/// hits, or 0 on the floor.
+pub fn pick_height(app: &RoomPlannerApp, screen: egui::Pos2) -> f32 {
+    pick_with_furniture(app, screen).2
+}
+
 /// Like [`pick`], and also the piece of furniture when that is what the ray hits first.
 /// Needed because a piece standing against a wall is within reach of that wall on the plan.
 pub fn pick_with_furniture(
     app: &RoomPlannerApp,
     screen: egui::Pos2,
-) -> (egui::Pos2, Option<usize>) {
+) -> (egui::Pos2, Option<usize>, f32) {
     let floor = app.screen_to_world(screen);
     if app.camera_mode == CameraMode::Top {
-        return (floor, None);
+        return (floor, None, 0.0);
     }
     let mut hit_furniture = None;
     let (o, d) = app.projection.ray(screen);
@@ -1170,12 +1469,17 @@ pub fn pick_with_furniture(
         let origin = item.world_to_local(egui::pos2(o.x, o.z) * PIXELS_PER_METER);
         let rot = egui::emath::Rot2::from_angle(-item.rotation);
         let dir = rot * egui::vec2(d.x, d.z);
-        let lo = Vec3::new(-item.width / 2.0, item.elevation, -item.depth / 2.0);
-        let hi = Vec3::new(
-            item.width / 2.0,
-            item.elevation + item.height,
-            item.depth / 2.0,
+        // Thin things like a bar light or a strip get a slightly larger target, so they
+        // can be pointed at.
+        const MIN_TARGET: f32 = 0.12;
+        let (hw, hh, hd) = (
+            item.width.max(MIN_TARGET) / 2.0,
+            item.height.max(MIN_TARGET) / 2.0,
+            item.depth.max(MIN_TARGET) / 2.0,
         );
+        let mid = item.elevation + item.height / 2.0;
+        let lo = Vec3::new(-hw, mid - hh, -hd);
+        let hi = Vec3::new(hw, mid + hh, hd);
         let (ro, rd) = (
             Vec3::new(origin.x, o.y, origin.y),
             Vec3::new(dir.x, d.y, dir.y),
@@ -1215,8 +1519,12 @@ pub fn pick_with_furniture(
     }
 
     match hit_point {
-        Some(p) => (egui::pos2(p.x, p.y) * PIXELS_PER_METER, hit_furniture),
-        None => (floor, None),
+        Some(p) => (
+            egui::pos2(p.x, p.y) * PIXELS_PER_METER,
+            hit_furniture,
+            (o + d * best).y.max(0.0),
+        ),
+        None => (floor, None, 0.0),
     }
 }
 
@@ -1290,10 +1598,16 @@ pub fn paint(
             None => c,
         };
         let top = dark_tops.then(|| mix([0.30, 0.32, 0.37]));
-        mesh.wall(wall, shown_wall_height(app, wall), mix(base), top);
+        let ends = crate::geometry::walls::wall_end_extensions(&app.walls, idx);
+        // A highlighted wall sits a hair higher, so its top wins where walls of different
+        // heights or odd angles still overlap.
+        let height = shown_wall_height(app, wall) + if tint.is_some() { 0.002 } else { 0.0 };
+        mesh.wall(wall, ends, height, mix(base), top);
     }
 
     let mut lights = Vec::new();
+    // Index ranges of lamps, which don't cast shadows.
+    let mut no_shadow: Vec<std::ops::Range<usize>> = Vec::new();
     for item in app.furniture.iter().chain(preview) {
         if let FurnitureKind::Model { path } = &item.kind {
             match app.models.get(path) {
@@ -1309,15 +1623,23 @@ pub fn paint(
                 ),
             }
         }
-        let mut parts = item.parts();
+        let ceiling = crate::geometry::walls::ceiling_height_at(&app.walls, item.position);
+        let mut parts = item.parts_under(ceiling);
         for part in &mut parts {
             // Lift parts on the floor a hair so rugs don't flicker against it.
             part.min[1] = part.min[1].max(0.002);
         }
+        let first = mesh.indices.len();
         mesh.furniture(item, &parts);
-        if let Some(light) = lamp::light(item) {
+        if item.is_lamp() {
+            no_shadow.push(first..mesh.indices.len());
+        }
+        for light in lamp::lights(item) {
             let pos = local_to_3d(item, Vec3::from(light.local));
-            lights.push((pos, light));
+            let beam = light
+                .beam
+                .map(|(dir, cos)| (local_normal_to_3d(item, Vec3::from(dir)), cos));
+            lights.push((pos, light, beam));
         }
     }
 
@@ -1346,26 +1668,74 @@ pub fn paint(
             lights.len().min(MAX_LIGHTS) as f32,
         ],
         sun: [0.35, 0.8, 0.45, env.sun],
+        shadow_mats: [[[0.0; 4]; 4]; MAX_SHADOWS],
         lights: [GpuLight {
             position: [0.0; 4],
             color: [0.0; 4],
+            direction: [0.0, -1.0, 0.0, -2.0],
+            shadow: [-1.0, 0.0, 0.0, 0.0],
         }; MAX_LIGHTS],
     };
-    for (slot, (pos, light)) in scene.lights.iter_mut().zip(&lights) {
+    let mut shadow_count = 0;
+    for (slot, (pos, light, beam)) in scene.lights.iter_mut().zip(&lights) {
         slot.position = [pos.x, pos.y, pos.z, 1.0];
         let c = light.color.map(|c| c * env.lamps);
         slot.color = [c[0], c[1], c[2], light.range];
+        slot.direction = match beam {
+            Some((dir, cos)) => [dir.x, dir.y, dir.z, *cos],
+            None => [0.0, -1.0, 0.0, -2.0],
+        };
+        // The nearest lights get shadow maps, looking along their beam (or down).
+        if app.shadows && shadow_count < MAX_SHADOWS {
+            scene.shadow_mats[shadow_count] =
+                shadow_view(*pos, *beam, light.range).to_cols_array_2d();
+            slot.shadow = [shadow_count as f32, 0.0, 0.0, 0.0];
+            shadow_count += 1;
+        }
     }
+    let caster_indices: Vec<u32> = if shadow_count == 0 {
+        Vec::new()
+    } else {
+        let mut skip = no_shadow.iter().peekable();
+        mesh.indices
+            .chunks(3)
+            .enumerate()
+            .filter(|(t, _)| {
+                let at = t * 3;
+                while skip.peek().is_some_and(|r| r.end <= at) {
+                    skip.next();
+                }
+                !skip.peek().is_some_and(|r| r.contains(&at))
+            })
+            .flat_map(|(_, tri)| tri.iter().copied())
+            .collect()
+    };
 
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
         True3dCallback {
             vertices: mesh.vertices,
             indices: mesh.indices,
+            caster_indices,
+            shadow_count,
             scene,
         },
     );
     painter.add(callback);
+}
+
+/// The view of a light's shadow map: from the light along its beam, or straight down for
+/// lamps that shine all round, wide enough to cover the beam.
+fn shadow_view(pos: Vec3, beam: Option<(Vec3, f32)>, range: f32) -> Mat4 {
+    let (dir, fov) = match beam {
+        Some((dir, cos)) => (dir, 2.0 * cos.clamp(-1.0, 1.0).acos() + 0.35),
+        None => (Vec3::NEG_Y, 2.44),
+    };
+    let fov = fov.clamp(0.5, 2.44); // up to 140°
+    let dir = dir.normalize_or(Vec3::NEG_Y);
+    let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let view = Mat4::look_at_rh(pos, pos + dir, up);
+    Mat4::perspective_rh(fov, 1.0, 0.03, range.max(0.5)) * view
 }
 
 #[cfg(test)]

@@ -1,11 +1,11 @@
 use crate::{
     app::{FurnitureDrag, FurnitureResize, FurnitureRotate, RoomPlannerApp, PIXELS_PER_METER},
-    furniture::furniture_at,
+    furniture::furniture_near,
     geometry::{
         openings::{opening_at, place_on_wall, wall_frame},
         rooms::extract_rooms,
         snapping::{
-            compute_snapping, find_closest_wall, get_hovered_endpoints, snap_furniture,
+            compute_snapping, find_closest_wall, get_hovered_endpoints, snap_furniture_from,
             snap_resized_edge, snap_to_furniture, ResizeFrame,
         },
         walls::{move_walls, snap_wall_move, WallDrag},
@@ -207,7 +207,7 @@ pub fn handle_input(
                         && clicked_wall.is_none()
                         && clicked_opening.is_none()
                     {
-                        furniture_at(&app.furniture, mouse_pos)
+                        furniture_near(&app.furniture, mouse_pos, 6.0 / scale)
                     } else {
                         None
                     };
@@ -248,6 +248,12 @@ pub fn handle_input(
                             }
                         }
                         if app.is_furniture_selected(idx) && response.drag_started() {
+                            // Slide on the level where it was grabbed, kept below the eye.
+                            let grab_height = press_screen
+                                .map(|p| crate::ui::view3d::pick_height(app, p))
+                                .unwrap_or(0.0)
+                                .min(app.projection.eye.y - 0.3)
+                                .max(0.0);
                             let item = &app.furniture[idx];
                             app.furniture_drag = Some(FurnitureDrag {
                                 raw_position: item.position,
@@ -255,6 +261,8 @@ pub fn handle_input(
                                 snapped_walls: Vec::new(),
                                 guides: Vec::new(),
                                 start: item.position,
+                                grab_height,
+                                upright: None,
                                 others: app
                                     .extra_furniture
                                     .iter()
@@ -300,7 +308,16 @@ pub fn handle_input(
                                 }
                             }
                         }
-                    } else if let Some(drag) = &mut app.furniture_drag {
+                    } else if app.furniture_drag.is_some()
+                        && drag_upright(app, ui, response.interact_pointer_pos())
+                    {
+                        // Moved on an upright plane instead of the floor.
+                    } else if app.furniture_drag.is_some() {
+                        let height = app.furniture_drag.as_ref().map_or(0.0, |d| d.grab_height);
+                        let world_delta = app.plane_drag_delta(response, height);
+                        let Some(drag) = &mut app.furniture_drag else {
+                            unreachable!()
+                        };
                         drag.raw_position += world_delta;
                         let snapping = !ui.ctx().input(|i| i.modifiers.alt);
                         let selected = app.selected_furniture;
@@ -311,7 +328,8 @@ pub fn handle_input(
                             drag.snapped_walls.clear();
                             drag.guides.clear();
                             if snapping {
-                                let snap = snap_furniture(item, &app.walls, scale);
+                                let snap =
+                                    snap_furniture_from(item, &app.walls, scale, Some(drag.start));
                                 item.position = snap.position;
                                 item.rotation = snap.rotation;
                                 drag.snapped_walls = snap.walls;
@@ -534,6 +552,155 @@ fn handle_furniture_rotate(
     true
 }
 
+/// While Ctrl is held during a furniture drag in 3D, moves the selection on an upright
+/// plane: the wall it stands against, or else one facing the camera. Up and down changes
+/// its height above the floor. Returns false when the floor drag should run instead.
+fn drag_upright(app: &mut RoomPlannerApp, ui: &Ui, screen: Option<Pos2>) -> bool {
+    use crate::app::{CameraMode, UprightDrag};
+    use glam::Vec3;
+    let (ctrl, alt) = ui.ctx().input(|i| (i.modifiers.command, i.modifiers.alt));
+    let (Some(screen), Some(idx)) = (screen, app.selected_furniture) else {
+        return false;
+    };
+    let Some(drag) = &app.furniture_drag else {
+        return false;
+    };
+    if !ctrl || app.camera_mode == CameraMode::Top || idx >= app.furniture.len() {
+        if drag.upright.is_some() {
+            // Carry on over the floor from where the piece is now.
+            let position = app.furniture[idx].position;
+            let others: Vec<(usize, Pos2)> = drag
+                .others
+                .iter()
+                .filter_map(|&(i, _)| Some((i, app.furniture.get(i)?.position)))
+                .collect();
+            let drag = app.furniture_drag.as_mut().unwrap();
+            drag.upright = None;
+            drag.raw_position = position;
+            drag.start = position;
+            drag.others = others;
+        }
+        return false;
+    }
+
+    let (o, d) = app.projection.ray(screen);
+    let hit = |plane: &UprightDrag| {
+        let n = Vec3::new(plane.normal.x, 0.0, plane.normal.y);
+        let p = Vec3::new(plane.point.x, 0.0, plane.point.y) / PIXELS_PER_METER;
+        let facing = d.dot(n);
+        // Looking along the plane, the pointer can't say where on it you are.
+        (facing.abs() > 0.05).then(|| o + d * ((p - o).dot(n) / facing))
+    };
+
+    if drag.upright.is_none() {
+        let item = &app.furniture[idx];
+        // The wall it stands against, or the nearest one running alongside within reach.
+        let wall_normal = drag
+            .snapped_walls
+            .first()
+            .and_then(|&i| app.walls.get(i))
+            .or_else(|| {
+                app.walls.iter().find(|w| {
+                    let near = crate::geometry::math::closest_point_on_segment(
+                        item.position,
+                        w.start,
+                        w.end,
+                    );
+                    near.distance(item.position)
+                        < (item.width.max(item.depth) / 2.0 + 0.3) * PIXELS_PER_METER
+                })
+            })
+            .map(|w| (w.end - w.start).normalized().rot90());
+        let toward_camera = Vec2::new(app.orbit_yaw.cos(), app.orbit_yaw.sin());
+        let normal = match wall_normal {
+            Some(n) if n.dot(toward_camera) < 0.0 => -n,
+            Some(n) => n,
+            None if app.camera_mode == CameraMode::Walk => {
+                -Vec2::new(app.camera_angle.cos(), app.camera_angle.sin())
+            }
+            None => toward_camera,
+        };
+        let mut plane = UprightDrag {
+            normal,
+            point: item.position,
+            anchor: Vec3::ZERO,
+            originals: std::iter::once(idx)
+                .chain(drag.others.iter().map(|&(i, _)| i))
+                .filter_map(|i| {
+                    Some((
+                        i,
+                        app.furniture.get(i)?.position,
+                        app.furniture[i].elevation,
+                    ))
+                })
+                .collect(),
+        };
+        let Some(anchor) = hit(&plane) else {
+            return true;
+        };
+        plane.anchor = anchor;
+        app.furniture_drag.as_mut().unwrap().upright = Some(plane);
+    }
+
+    let plane = app
+        .furniture_drag
+        .as_ref()
+        .unwrap()
+        .upright
+        .as_ref()
+        .unwrap();
+    let Some(now) = hit(plane) else {
+        return true;
+    };
+    let moved = now - plane.anchor;
+    let along = plane.normal.rot90();
+    let sideways = along * Vec2::new(moved.x, moved.z).dot(along) * PIXELS_PER_METER;
+    let mut rise = moved.y;
+
+    // Heights snap to whole centimeters, or to the top, bottom or height of furniture
+    // nearby, e.g. to stand on a sideboard or line up with another shelf.
+    let (start_pos, start_elevation) = (plane.originals[0].1, plane.originals[0].2);
+    if !alt {
+        let item = &app.furniture[idx];
+        let moving: Vec<usize> = plane.originals.iter().map(|o| o.0).collect();
+        let reach = 10.0 / app.scale() / PIXELS_PER_METER; // meters
+        let position = start_pos + sideways;
+        let wanted = start_elevation + rise;
+        let mut best: Option<(f32, f32)> = None;
+        let mut consider = |height: f32| {
+            let off = (height - wanted).abs();
+            if off <= reach && best.is_none_or(|b| off < b.0) {
+                best = Some((off, height));
+            }
+        };
+        consider(0.0);
+        for (i, other) in app.furniture.iter().enumerate() {
+            if moving.contains(&i) || other.position.distance(position) > 2.0 * PIXELS_PER_METER {
+                continue;
+            }
+            // Standing on it, hanging under it, or level with it.
+            consider(other.top());
+            consider(other.elevation - item.height);
+            consider(other.elevation);
+            consider(other.top() - item.height);
+        }
+        rise = match best {
+            Some((_, height)) => height - start_elevation,
+            None => ((wanted * 100.0).round() / 100.0) - start_elevation,
+        };
+    }
+
+    let originals = plane.originals.clone();
+    for (i, position, elevation) in originals {
+        if let Some(item) = app.furniture.get_mut(i) {
+            item.position = position + sideways;
+            item.elevation = (elevation + rise).max(0.0);
+        }
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+    true
+}
+
 /// Smallest size a piece can be dragged to, in meters.
 const MIN_FURNITURE_SIZE: f32 = 0.05;
 
@@ -560,6 +727,33 @@ pub fn resize_handles(app: &RoomPlannerApp) -> Option<[(Pos2, (i8, i8)); 8]> {
     }))
 }
 
+/// Smallest size on screen, in pixels, across which a piece gets resize handles.
+const MIN_HANDLE_SPAN: f32 = 24.0;
+
+/// The resize handles of the selected piece that can be used, for drawing: corners when it
+/// is big enough on screen, and the sides that have room across them.
+pub fn usable_resize_handles(app: &RoomPlannerApp) -> Vec<Pos2> {
+    let Some(handles) = resize_handles(app) else {
+        return Vec::new();
+    };
+    let corners: Vec<Pos2> = handles[..4].iter().map(|h| h.0).collect();
+    let shortest = (0..4)
+        .map(|i| corners[i].distance(corners[(i + 1) % 4]))
+        .fold(f32::INFINITY, f32::min);
+    let mut usable = Vec::new();
+    if shortest >= MIN_HANDLE_SPAN {
+        usable.extend(&corners);
+    }
+    for i in 0..4 {
+        // The opposite side's midpoint is two handles on.
+        let across = handles[4 + i].0.distance(handles[4 + (i + 2) % 4].0);
+        if across >= MIN_HANDLE_SPAN {
+            usable.push(handles[4 + i].0);
+        }
+    }
+    usable
+}
+
 /// The handle at a screen position, and the height (meters) of the level it was grabbed at.
 /// Corners come first, then anywhere along a side. In 3D the whole outline box works: its
 /// top and bottom edges resize a side, its upright edges a corner.
@@ -571,19 +765,42 @@ fn resize_handle_at(app: &RoomPlannerApp, p: Pos2) -> Option<(Pos2, (i8, i8), f3
     let footprint = item.footprint();
     let in_3d = app.camera_mode != crate::app::CameraMode::Top;
 
+    // Only edges you can see can be grabbed: in 3D the back edges of a box show through
+    // its front on screen, and grabbing those would resize instead of move. Side i is
+    // the face from corner i to the next (see the order in `resize_handles`).
+    let eye = app.projection.eye;
+    let eye_plan = Pos2::new(eye.x, eye.z) * PIXELS_PER_METER;
+    let face_visible = |i: usize| {
+        let (sx, sz) = handles[4 + (i % 4)].1;
+        let outward = Rot2::from_angle(item.rotation) * vec2(sx as f32, sz as f32);
+        let center =
+            item.local_to_world(sx as f32 * item.width / 2.0, sz as f32 * item.depth / 2.0);
+        !in_3d || (eye_plan - center).dot(outward) > 0.0
+    };
+    let top_visible = !in_3d || eye.y > top;
+    // Corner i sits between side i - 1 and side i.
+    let corner_visible = |i: usize| face_visible((i + 3) % 4) || face_visible(i);
+
     // Corner squares, then the upright edges below them.
     let corners: Vec<Pos2> = handles[..4].iter().map(|h| h.0).collect();
     let shortest = (0..4)
         .map(|i| corners[i].distance(corners[(i + 1) % 4]))
         .fold(f32::INFINITY, f32::min);
     let corner_reach = (shortest / 3.0).clamp(4.0, 10.0);
+    // Too thin on screen for corners: a bar or strip resizes only from its ends.
+    let roomy = shortest >= MIN_HANDLE_SPAN;
     for (i, &corner) in corners.iter().enumerate() {
-        if corner.distance(p) < corner_reach {
+        if roomy && (top_visible || corner_visible(i)) && corner.distance(p) < corner_reach {
             return Some((corner, handles[i].1, top));
         }
     }
-    if in_3d {
+    if in_3d && roomy {
         for (i, &corner) in corners.iter().enumerate() {
+            // Only the upright edges at the outline's sides: the one between two faces you
+            // can see runs down the middle of the piece, where you grab it to move it.
+            if face_visible((i + 3) % 4) == face_visible(i) {
+                continue;
+            }
             let foot = app.world3_to_screen(footprint[i], bottom);
             let on_edge = closest_point_on_segment(p, corner, foot);
             if on_edge.distance(p) < 5.0 {
@@ -604,15 +821,26 @@ fn resize_handle_at(app: &RoomPlannerApp, p: Pos2) -> Option<(Pos2, (i8, i8), f3
         let center = app.world3_to_screen(item.position, level);
         // Side i runs from corner i to the next one (see the order in `resize_handles`).
         for i in 0..4 {
+            // A top edge shows when the top or that side does; a bottom edge only with
+            // its side.
+            let visible = face_visible(i) || (level == top && top_visible);
+            if !visible {
+                continue;
+            }
             let (a, b) = (ring[i], ring[(i + 1) % 4]);
             let on_side = closest_point_on_segment(p, a, b);
             let distance = on_side.distance(p);
             let side_of = |q: Pos2| (b - a).x * (q - a).y - (b - a).y * (q - a).x;
             let inside = side_of(p) * side_of(center) > 0.0;
             let across = closest_point_on_segment(center, a, b).distance(center) * 2.0;
+            // A side right next to the opposite one, like the long sides of a thin bar,
+            // would cover the whole piece and leave nothing to move it by.
+            if across < MIN_HANDLE_SPAN {
+                continue;
+            }
             let reach = if inside { (across / 4.0).min(6.0) } else { 9.0 };
             // Leave the ends to the corners.
-            let at_end = on_side.distance(a) < 1.0 || on_side.distance(b) < 1.0;
+            let at_end = roomy && (on_side.distance(a) < 1.0 || on_side.distance(b) < 1.0);
             if distance < reach && !at_end {
                 return Some((on_side, handles[4 + i].1, level));
             }
@@ -667,7 +895,12 @@ fn handle_furniture_resize(app: &mut RoomPlannerApp, ui: &Ui, response: &Respons
     let (sx, sz) = (resize.handle.0 as f32, resize.handle.1 as f32);
     let (alt, shift) = ui.ctx().input(|i| (i.modifiers.alt, i.modifiers.shift));
     let mouse = ui.ctx().input(|i| i.pointer.interact_pos());
-    if let Some(mouse) = mouse.filter(|_| response.dragged()) {
+    // Near or above the horizon the pointer says nothing useful; keep the last size.
+    let in_view = |m: &Pos2| {
+        app.camera_mode == crate::app::CameraMode::Top
+            || app.screen_to_plane_near(*m, resize.level).is_some()
+    };
+    if let Some(mouse) = mouse.filter(|m| response.dragged() && in_view(m)) {
         let turn = Rot2::from_angle(resize.rotation);
         let target = app.screen_to_plane(mouse, resize.level) - resize.grab_offset;
         // Where the handle should be, in the piece's own axes (meters from its old center).

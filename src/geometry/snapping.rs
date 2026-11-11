@@ -278,6 +278,18 @@ pub struct FurnitureSnap {
 /// perpendicular one so it can settle into a corner. The rotation is corrected to be
 /// exactly parallel to the first wall.
 pub fn snap_furniture(item: &Furniture, walls: &[Wall], zoom: f32) -> FurnitureSnap {
+    snap_furniture_from(item, walls, zoom, None)
+}
+
+/// [`snap_furniture`] for a piece being dragged from `from`: walls are solid, so a piece
+/// pushed into a wall stays flush on the side it came from until it is dragged all the way
+/// past the wall, instead of flipping to the far side halfway through.
+pub fn snap_furniture_from(
+    item: &Furniture,
+    walls: &[Wall],
+    zoom: f32,
+    from: Option<Pos2>,
+) -> FurnitureSnap {
     let snap_dist = 15.0 / zoom;
     let mut snap = FurnitureSnap {
         position: item.position,
@@ -326,9 +338,16 @@ pub fn snap_furniture(item: &Furniture, walls: &[Wall], zoom: f32) -> FurnitureS
 
             // Flush against the wall's surface, not its center line.
             let gap = half_across + WALL_THICKNESS / 2.0 * PIXELS_PER_METER;
-            let target = if across >= 0.0 { gap } else { -gap };
+            // While the piece overlaps the wall it is pushed back out the way it came.
+            let came_from = from.map(|f| (f - wall.start).dot(normal));
+            let pushed_in = across.abs() < gap && came_from.is_some_and(|c| c.abs() >= gap * 0.5);
+            let side = match came_from {
+                Some(c) if pushed_in => c,
+                _ => across,
+            };
+            let target = if side >= 0.0 { gap } else { -gap };
             let correction = target - across;
-            if correction.abs() > snap_dist {
+            if correction.abs() > snap_dist && !pushed_in {
                 continue;
             }
             if best.is_none_or(|b| correction.abs() < b.0) {
@@ -616,6 +635,21 @@ mod tests {
         assert_eq!(snap(85.0), None);
         // Dragging the depth: the wall runs the other way and the table is out of line.
         assert!(snap_resized_edge(&frame, [&other], &walls, 1, 45.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn furniture_pushed_into_a_wall_stays_on_its_side() {
+        // A 70 × 40 table flush below the wall along y = 0 (surface at 2.5, so its
+        // center at 22.5), pushed up until its center is past the wall's center line.
+        let walls = corner_walls();
+        let from = Some(Pos2::new(200.0, 22.5));
+        let pushed = table_at(200.0, -5.0, 0.0);
+        let snap = snap_furniture_from(&pushed, &walls, 1.0, from);
+        assert!((snap.position.y - 22.5).abs() < 1e-3, "{:?}", snap.position);
+        // Dragged all the way through, it may go to the other side.
+        let through = table_at(200.0, -30.0, 0.0);
+        let snap = snap_furniture_from(&through, &walls, 1.0, from);
+        assert!((snap.position.y + 22.5).abs() < 1e-3, "{:?}", snap.position);
     }
 
     fn corner_walls() -> Vec<Wall> {

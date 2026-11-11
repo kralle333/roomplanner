@@ -72,6 +72,9 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
 }
 
 fn hint(app: &RoomPlannerApp) -> &'static str {
+    if app.peek_return.is_some() {
+        return "Peeking at the compared layout · let go of C to go back";
+    }
     if app.camera_mode == CameraMode::Walk {
         return "Drag to look around · arrow keys or WASD to walk · right-drag to step · T or the toolbar to leave";
     }
@@ -93,6 +96,17 @@ fn hint(app: &RoomPlannerApp) -> &'static str {
         }
         Tool::Select if app.furniture_rotate.is_some() => {
             "Snaps to 15° steps · hold Alt to rotate freely"
+        }
+        Tool::Select
+            if app
+                .furniture_drag
+                .as_ref()
+                .is_some_and(|d| d.upright.is_some()) =>
+        {
+            "Moving up, down and along the wall · snaps to other furniture's heights · Alt for any height"
+        }
+        Tool::Select if app.furniture_drag.is_some() && app.camera_mode != CameraMode::Top => {
+            "Snaps to walls and other furniture · hold Ctrl to move up and down · Alt to place freely"
         }
         Tool::Select if app.furniture_drag.is_some() => {
             "Snaps to walls and other furniture · hold Alt to place freely · R to rotate"

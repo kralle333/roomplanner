@@ -103,6 +103,38 @@ pub enum LampStyle {
     Pendant,
     /// Mounted on a wall at its elevation.
     Wall,
+    /// A bar on the ceiling with a row of spots hanging from it, spread along its width.
+    Track,
+    /// A row of spots set into the ceiling, spread along the width.
+    Downlights,
+    /// A long bar light hanging from the ceiling on two wires, e.g. over a dining table.
+    LinearPendant,
+    /// A thin strip of light, e.g. under kitchen wall cabinets.
+    Strip,
+}
+
+impl LampStyle {
+    /// Several spots in a row, set by `FurnitureKind::Lamp::spots`.
+    pub fn has_spots(self) -> bool {
+        matches!(self, LampStyle::Track | LampStyle::Downlights)
+    }
+
+    /// Lit along its length rather than from one bulb.
+    pub fn is_linear(self) -> bool {
+        matches!(self, LampStyle::LinearPendant | LampStyle::Strip)
+    }
+
+    /// Has a lamp shade (cone, drum or globe).
+    pub fn has_shade(self) -> bool {
+        matches!(
+            self,
+            LampStyle::Floor | LampStyle::Table | LampStyle::Pendant | LampStyle::Wall
+        )
+    }
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -151,14 +183,27 @@ pub enum FurnitureKind {
         row_heights: Vec<f32>,
     },
     Plant,
+    /// A standing person, to check heights, reach and where shadows fall. Faces +z.
+    Person,
     Lamp {
         style: LampStyle,
         shade: ShadeShape,
         /// Only used by floor and table lamps; pendants and wall lamps are all shade.
         shade_height: f32,
+        /// Per spot for lamps with several spots.
         lumens: f32,
         kelvin: f32,
         on: bool,
+        /// Number of spots, for spot tracks and rows of ceiling spots.
+        #[serde(default = "one")]
+        spots: u32,
+        /// Spots: how far the outermost ones are turned outwards along the row, in
+        /// degrees; the ones between turn in proportion.
+        #[serde(default)]
+        spread: f32,
+        /// Spots: how far all of them lean towards the front (+) or back (−), in degrees.
+        #[serde(default)]
+        tilt: f32,
     },
     /// An imported glTF/GLB model, scaled to fit the furniture's size.
     Model {
@@ -182,10 +227,14 @@ pub struct Furniture {
     #[serde(default)]
     pub elevation: f32,
     pub color: [u8; 3],
-    /// A different color for the top surface, e.g. a countertop on a cabinet.
-    /// Only used by plain boxes.
+    /// A different color for the top surface, e.g. a countertop on a cabinet, a tabletop
+    /// or the top board of a shelf (see `Furniture::has_top`).
     #[serde(default)]
     pub top_color: Option<[u8; 3]>,
+    /// The top is solid wood like a butcher-block worktop, tinted by the top color (or the
+    /// piece's color when the top has none of its own).
+    #[serde(default)]
+    pub top_wood: bool,
     /// Alternatives to try in this spot. When non-empty it holds every option,
     /// with `options[active_option]` being a (possibly stale) copy of this item.
     #[serde(default)]
@@ -257,6 +306,27 @@ impl Default for Finishes {
     }
 }
 
+/// One version of how the home is furnished and finished. All layouts of a plan share its
+/// walls, windows and doors.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    pub name: String,
+    #[serde(default)]
+    pub furniture: Vec<Furniture>,
+    #[serde(default)]
+    pub finishes: Finishes,
+}
+
+impl Layout {
+    pub fn named(name: impl Into<String>) -> Self {
+        Layout {
+            name: name.into(),
+            furniture: Vec::new(),
+            finishes: Finishes::default(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AppSaveState {
     pub walls: Vec<Wall>,
@@ -266,4 +336,34 @@ pub struct AppSaveState {
     pub finishes: Finishes,
     pub pan_offset: Vec2,
     pub zoom_factor: f32,
+    /// Where you were looking when the plan was saved. Missing in older files, which then
+    /// open showing the whole plan.
+    #[serde(default)]
+    pub camera: Option<SavedCamera>,
+    /// Every layout, the shown one included. `furniture` and `finishes` above are a copy of
+    /// the shown one, so older versions of the app still open the file. Empty in older
+    /// files, which have just the one layout.
+    #[serde(default)]
+    pub layouts: Vec<Layout>,
+    #[serde(default)]
+    pub active_layout: usize,
+}
+
+/// The camera, as stored in a plan file.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedCamera {
+    pub mode: crate::app::CameraMode,
+    /// Top view: the plan point in the middle of the view, and the zoom. Kept as a point
+    /// rather than a pixel offset, so it still fits a window of another size.
+    pub top_center: Pos2,
+    pub zoom: f32,
+    /// 3D view: the floor point it turns around (meters), angles (radians) and distance.
+    pub orbit_target: Vec2,
+    pub orbit_yaw: f32,
+    pub orbit_pitch: f32,
+    pub orbit_distance: f32,
+    /// Walking: where you stand (plan units) and which way you look (radians).
+    pub walk_position: Pos2,
+    pub walk_angle: f32,
+    pub walk_pitch: f32,
 }

@@ -35,7 +35,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-                for (tab, label) in [(LeftTab::Add, "＋ Add"), (LeftTab::Home, "🏠 Home")] {
+                for (tab, label) in [(LeftTab::Add, "+ Add"), (LeftTab::Home, "🏠 Home")] {
                     let selected = app.left_tab == tab;
                     let text = if selected {
                         RichText::new(label).strong().color(ACCENT)
@@ -54,6 +54,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             match app.left_tab {
                 LeftTab::Add => library(app, ui),
                 LeftTab::Home => {
+                    crate::ui::color::collect_plan_colors(app, ui.ctx());
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         finishes(app, ui);
                         ui.add_space(8.0);
@@ -428,7 +429,7 @@ fn finishes(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             .show(ui, |ui| {
                 ui.label("Wall color");
                 ui.horizontal(|ui| {
-                    ui.color_edit_button_srgb(&mut app.finishes.wall_color);
+                    crate::ui::color::color_button(ui, &mut app.finishes.wall_color);
                     for (name, color) in [
                         ("White", [246, 246, 244]),
                         ("Off-white", [240, 236, 226]),
@@ -511,6 +512,7 @@ pub fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) 
     let mut deselect = false;
     let mut select_similar = false;
     let before = app.furniture[idx].clone();
+    let ceiling = crate::geometry::walls::ceiling_height_at(&app.walls, before.position);
     let extra = app.extra_furniture.len();
     let similar = app
         .furniture
@@ -591,7 +593,11 @@ pub fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) 
 
                 ui.label("Rotation");
                 ui.horizontal(|ui| {
+                    // A turn of 359.99…° shows as 0°, not 360°.
                     let mut degrees = item.rotation.to_degrees().rem_euclid(360.0);
+                    if degrees > 359.95 {
+                        degrees = 0.0;
+                    }
                     if ui
                         .add(
                             egui::DragValue::new(&mut degrees)
@@ -626,31 +632,15 @@ pub fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) 
                     } else {
                         "Color"
                     });
-                    ui.color_edit_button_srgb(&mut item.color);
+                    crate::ui::color::color_button(ui, &mut item.color);
                     ui.end_row();
                 }
 
-                if matches!(item.kind, FurnitureKind::Box) {
-                    ui.label("Top color");
-                    ui.horizontal(|ui| {
-                        let mut separate = item.top_color.is_some();
-                        if ui
-                            .checkbox(&mut separate, "")
-                            .on_hover_text("Give the top its own color, like a countertop")
-                            .changed()
-                        {
-                            item.top_color = separate.then_some(item.color);
-                        }
-                        if let Some(top) = &mut item.top_color {
-                            ui.color_edit_button_srgb(top);
-                        } else {
-                            ui.label(RichText::new("Same as sides").small().color(TEXT_MUTED));
-                        }
-                    });
-                    ui.end_row();
+                if item.has_top() {
+                    top_row(ui, item);
                 }
 
-                kind_params(ui, item);
+                kind_params(ui, item, ceiling);
             });
 
         if let FurnitureKind::Model { path } = &item.kind {
@@ -694,6 +684,97 @@ pub fn properties_card(app: &mut RoomPlannerApp, ui: &mut egui::Ui, idx: usize) 
     }
 }
 
+/// Wood tones for tops, like the usual worktop woods.
+const TOP_WOODS: [(&str, [u8; 3]); 5] = [
+    ("Birch", [226, 198, 156]),
+    ("Oak", [200, 154, 104]),
+    ("Beech", [212, 162, 118]),
+    ("Dark oak", [142, 100, 66]),
+    ("Walnut", [116, 78, 52]),
+];
+
+/// The look of the top of a cabinet, table or shelf: like the rest, its own color, or wood.
+fn top_row(ui: &mut egui::Ui, item: &mut Furniture) {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Look {
+        Same,
+        Color,
+        Wood,
+    }
+    let look = if item.top_wood {
+        Look::Wood
+    } else if item.top_color.is_some() {
+        Look::Color
+    } else {
+        Look::Same
+    };
+    ui.label("Top")
+        .on_hover_text("The top surface, like a countertop on a cabinet");
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let mut chosen = look;
+            ui.selectable_value(&mut chosen, Look::Same, "Same")
+                .on_hover_text("The same as the rest of the piece");
+            ui.selectable_value(&mut chosen, Look::Color, "Color")
+                .on_hover_text("A color of its own, like a stone or laminate countertop");
+            ui.selectable_value(&mut chosen, Look::Wood, "Wood")
+                .on_hover_text("Solid wood, like a butcher-block worktop");
+            if chosen != look {
+                match chosen {
+                    Look::Same => {
+                        item.top_color = None;
+                        item.top_wood = false;
+                    }
+                    Look::Color => {
+                        item.top_wood = false;
+                        item.top_color = Some(item.top_color.unwrap_or(item.color));
+                    }
+                    Look::Wood => {
+                        item.top_wood = true;
+                        item.top_color = Some(TOP_WOODS[1].1);
+                    }
+                }
+            }
+        });
+        if let Some(top) = &mut item.top_color {
+            ui.horizontal(|ui| {
+                crate::ui::color::color_button(ui, top);
+                if item.top_wood {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for (name, tone) in TOP_WOODS {
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                        let selected = *top == tone;
+                        ui.painter().rect_filled(
+                            rect,
+                            3.0,
+                            egui::Color32::from_rgb(tone[0], tone[1], tone[2]),
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            3.0,
+                            egui::Stroke::new(
+                                if selected { 2.0 } else { 1.0 },
+                                if selected {
+                                    ACCENT
+                                } else {
+                                    crate::ui::theme::BORDER
+                                },
+                            ),
+                            egui::StrokeKind::Inside,
+                        );
+                        if response.on_hover_text(name).clicked() {
+                            *top = tone;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    ui.end_row();
+}
+
 /// Copies whatever was just changed on the piece in the panel to the rest of the selection.
 /// Name and type-specific settings only go to pieces of the same type.
 fn copy_edits_to_selection(app: &mut RoomPlannerApp, idx: usize, before: &Furniture) {
@@ -722,8 +803,11 @@ fn copy_edits_to_selection(app: &mut RoomPlannerApp, idx: usize, before: &Furnit
         if after.color != before.color {
             item.color = after.color;
         }
-        if after.top_color != before.top_color && same_kind(item) {
+        if after.top_color != before.top_color && item.has_top() {
             item.top_color = after.top_color;
+        }
+        if after.top_wood != before.top_wood && item.has_top() {
+            item.top_wood = after.top_wood;
         }
         if after.rotation != before.rotation {
             item.rotation = (item.rotation + after.rotation - before.rotation)
@@ -911,10 +995,21 @@ fn keep_proportions(item: &mut Furniture, before: [f32; 3]) {
     [item.width, item.depth, item.height] = scaled;
 }
 
-fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
+/// Settings that depend on the kind of piece. `ceiling` is the ceiling height where it
+/// stands, for lamps hanging from it.
+fn kind_params(ui: &mut egui::Ui, item: &mut Furniture, ceiling: f32) {
     let mut new_elevation = None;
+    let cable = item.cable_length(ceiling);
+    let height = item.height;
+    // (width, depth, height) to switch to, e.g. when a lamp becomes a spot track.
+    let mut new_size: Option<(f32, f32, f32)> = None;
+    let mut new_width = None;
+    let width = item.width;
     match &mut item.kind {
-        FurnitureKind::Box | FurnitureKind::Model { .. } | FurnitureKind::Plant => {}
+        FurnitureKind::Box
+        | FurnitureKind::Model { .. }
+        | FurnitureKind::Plant
+        | FurnitureKind::Person => {}
         FurnitureKind::Table {
             top_thickness,
             leg_size,
@@ -971,6 +1066,9 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
             lumens,
             kelvin,
             on,
+            spots,
+            spread,
+            tilt,
         } => {
             ui.label("Light");
             ui.horizontal(|ui| {
@@ -988,26 +1086,100 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
                         LampStyle::Table,
                         LampStyle::Pendant,
                         LampStyle::Wall,
+                        LampStyle::Track,
+                        LampStyle::Downlights,
+                        LampStyle::LinearPendant,
+                        LampStyle::Strip,
                     ] {
                         ui.selectable_value(style, s, style_label(s));
                     }
                 });
             if *style != before {
-                new_elevation = Some(match style {
-                    LampStyle::Floor => 0.0,
-                    LampStyle::Table => 0.75,
-                    LampStyle::Pendant | LampStyle::Wall => 1.6,
-                });
+                // Ceiling lights go up to this room's ceiling.
+                // A shape and place that suits the new type.
+                let (size, elevation) = match style {
+                    LampStyle::Floor => ((0.4, 0.4, 1.5), 0.0),
+                    LampStyle::Table => ((0.3, 0.3, 0.45), 0.75),
+                    LampStyle::Pendant => ((0.4, 0.4, 0.25), 1.6),
+                    LampStyle::Wall => ((0.2, 0.2, 0.2), 1.6),
+                    LampStyle::Track => ((1.6, 0.08, 0.18), ceiling - 0.18),
+                    LampStyle::Downlights => ((2.4, 0.1, 0.02), ceiling - 0.02),
+                    LampStyle::LinearPendant => ((1.2, 0.07, 0.05), 1.75),
+                    LampStyle::Strip => ((0.8, 0.03, 0.01), 1.4),
+                };
+                if before.has_shade() != style.has_shade() {
+                    new_size = Some(size);
+                }
+                if style.has_spots() && *spots < 2 {
+                    *spots = 4;
+                }
+                new_elevation = Some(elevation);
             }
             ui.end_row();
 
-            ui.label("Shade");
-            ui.horizontal(|ui| {
-                ui.selectable_value(shade, ShadeShape::Cone, "Cone");
-                ui.selectable_value(shade, ShadeShape::Drum, "Drum");
-                ui.selectable_value(shade, ShadeShape::Globe, "Globe");
-            });
-            ui.end_row();
+            if style.has_shade() {
+                ui.label("Shade");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(shade, ShadeShape::Cone, "Cone");
+                    ui.selectable_value(shade, ShadeShape::Drum, "Drum");
+                    ui.selectable_value(shade, ShadeShape::Globe, "Globe");
+                });
+                ui.end_row();
+            }
+
+            if let Some(mut length) = cable {
+                ui.label("Cable").on_hover_text(
+                    "From the ceiling to the top of the lamp. Longer hangs it lower",
+                );
+                if cm_value(ui, &mut length).changed() {
+                    let length = length.clamp(0.0, (ceiling - height).max(0.0));
+                    new_elevation = Some(ceiling - height - length);
+                }
+                ui.end_row();
+            }
+
+            if style.has_spots() {
+                ui.label("Spots");
+                ui.add(egui::DragValue::new(spots).range(1..=24))
+                    .on_hover_text("Spread evenly along the length");
+                ui.end_row();
+
+                ui.label("Spacing").on_hover_text(
+                    "From one spot to the next; changing it makes the row longer or shorter",
+                );
+                let count = (*spots).max(1) as f32;
+                let mut spacing = width / count;
+                if cm_value(ui, &mut spacing).changed() && spacing > 0.02 {
+                    new_width = Some(spacing * count);
+                }
+                ui.end_row();
+
+                ui.label("Spread").on_hover_text(
+                    "Turns the outer spots outwards, the ones between in proportion, so a \
+                     short track can light a long counter. The lines show where they point",
+                );
+                ui.add(
+                    egui::DragValue::new(spread)
+                        .range(-45.0..=45.0)
+                        .speed(0.5)
+                        .max_decimals(0)
+                        .suffix("°"),
+                );
+                ui.end_row();
+
+                ui.label("Tilt").on_hover_text(
+                    "Leans all spots forward (+) or back (−), e.g. towards the wall. \
+                     The lines show where they point",
+                );
+                ui.add(
+                    egui::DragValue::new(tilt)
+                        .range(-60.0..=60.0)
+                        .speed(0.5)
+                        .max_decimals(0)
+                        .suffix("°"),
+                );
+                ui.end_row();
+            }
 
             if matches!(style, LampStyle::Floor | LampStyle::Table) {
                 ui.label("Shade height");
@@ -1015,13 +1187,24 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
                 ui.end_row();
             }
 
-            ui.label("Brightness");
+            ui.label(if style.has_spots() {
+                "Per spot"
+            } else {
+                "Brightness"
+            });
             ui.add(
-                egui::Slider::new(lumens, 100.0..=3000.0)
-                    .suffix(" lm")
-                    .step_by(50.0),
+                egui::Slider::new(
+                    lumens,
+                    100.0..=if style.is_linear() { 6000.0 } else { 3000.0 },
+                )
+                .suffix(" lm")
+                .step_by(50.0),
             )
-            .on_hover_text("A classic 60 W bulb is about 800 lm");
+            .on_hover_text(if style.has_spots() {
+                "Brightness of each spot. A typical LED spot is 300–500 lm"
+            } else {
+                "A classic 60 W bulb is about 800 lm"
+            });
             ui.end_row();
 
             ui.label("Color temp.");
@@ -1048,6 +1231,12 @@ fn kind_params(ui: &mut egui::Ui, item: &mut Furniture) {
     }
     if let Some(elevation) = new_elevation {
         item.elevation = elevation;
+    }
+    if let Some((w, d, h)) = new_size {
+        (item.width, item.depth, item.height) = (w, d, h);
+    }
+    if let Some(w) = new_width {
+        item.width = w;
     }
 }
 
@@ -1187,5 +1376,9 @@ fn style_label(style: LampStyle) -> &'static str {
         LampStyle::Table => "Table lamp",
         LampStyle::Pendant => "Pendant (ceiling)",
         LampStyle::Wall => "Wall lamp",
+        LampStyle::Track => "Spot track (ceiling)",
+        LampStyle::Downlights => "Ceiling spots, in a row",
+        LampStyle::LinearPendant => "Bar pendant",
+        LampStyle::Strip => "LED strip",
     }
 }

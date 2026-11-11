@@ -1,6 +1,6 @@
 use crate::{
     app::{same_type, CameraMode, RoomPlannerApp, TimeOfDay, PIXELS_PER_METER},
-    furniture::{furniture_at, Category, PRESETS},
+    furniture::{furniture_near, Category, PRESETS},
     geometry::{
         openings::{opening_at, place_on_wall},
         snapping::{find_closest_wall, get_hovered_endpoints, snap_furniture},
@@ -36,6 +36,10 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
                 app.pending_fit = false;
                 app.zoom_to_fit();
                 view3d::fit_orbit(app);
+                // A plan saved with a camera opens looking where it was saved.
+                if let Some(camera) = app.pending_camera.take() {
+                    crate::storage::apply_camera(app, camera);
+                }
             }
 
             let navigating = view3d::handle_camera_input(app, ui, &response);
@@ -94,7 +98,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             let hovered_furniture = if in_front.is_some() {
                 in_front
             } else if hovered_endpoints.is_empty() && hovered_wall_idx.is_none() {
-                pointer.and_then(|p| furniture_at(&app.furniture, p))
+                pointer.and_then(|p| furniture_near(&app.furniture, p, 6.0 / app.scale()))
             } else {
                 None
             };
@@ -211,6 +215,7 @@ pub fn show(app: &mut RoomPlannerApp, ui: &mut egui::Ui) {
             }
 
             view_toolbar(app, ui, rect);
+            crate::ui::layout_tabs::show(app, ui, rect);
             crate::ui::properties::show(app, ui, rect);
             if app.camera_mode == CameraMode::Top {
                 zoom_controls(app, ui, rect);
@@ -246,6 +251,12 @@ fn view_toolbar(app: &mut RoomPlannerApp, ui: &mut egui::Ui, canvas: egui::Rect)
                         ui.selectable_value(&mut app.time_of_day, time, icon)
                             .on_hover_text(tip);
                     }
+                    if app.camera_mode != CameraMode::Top {
+                        ui.toggle_value(&mut app.shadows, "◑ Shadows").on_hover_text(
+                            "Lamps cast shadows (the 8 nearest). Put a Person (Decor) where \
+                             you'd stand to see where your own shadow falls",
+                        );
+                    }
                     if app.camera_mode == CameraMode::Orbit {
                         ui.separator();
                         ui.toggle_value(&mut app.cut_walls, "✂ Cut walls")
@@ -264,7 +275,7 @@ fn view_toolbar(app: &mut RoomPlannerApp, ui: &mut egui::Ui, canvas: egui::Rect)
         });
 }
 
-fn floating_frame() -> egui::Frame {
+pub fn floating_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 240))
         .stroke(egui::Stroke::new(1.0, crate::ui::theme::BORDER))

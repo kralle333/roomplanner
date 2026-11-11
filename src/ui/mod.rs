@@ -1,6 +1,8 @@
 pub mod canvas;
+pub mod color;
 pub mod furniture_panel;
 pub mod help;
+pub mod layout_tabs;
 pub mod properties;
 pub mod status_bar;
 pub mod theme;

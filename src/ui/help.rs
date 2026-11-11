@@ -18,12 +18,35 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "Arrow keys (Shift)",
                 "Nudge selected furniture 1 cm (10 cm)",
             ),
+            (
+                "Page Up / Down (Shift)",
+                "Raise / lower selected furniture 1 cm (10 cm)",
+            ),
+            (
+                "3D: hold Ctrl while dragging",
+                "Move up, down and along the wall instead of over the floor",
+            ),
+        ],
+    ),
+    (
+        "Layouts",
+        &[
+            ("+ at the bottom", "New layout: a copy of the shown one"),
+            ("1 – 9", "Show that layout (the camera stays put)"),
+            ("Hold C", "Peek at the layout you came from"),
+            ("Δ Differences", "Outline what changed from that layout"),
+            ("Right-click a tab", "Rename, duplicate, move, delete"),
+            ("File → Import layouts", "Bring other plan files in as tabs"),
         ],
     ),
     (
         "Camera",
         &[
             ("T", "Switch between top view and 3D"),
+            (
+                "◑ Shadows (3D)",
+                "Lamps cast shadows; add a Person (Decor) to see your own",
+            ),
             (
                 "Top view: two-finger scroll / pinch / wheel",
                 "Pan / zoom / zoom",

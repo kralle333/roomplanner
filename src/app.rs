@@ -36,6 +36,12 @@ struct Prefs {
     scroll_zooms: bool,
     cut_walls: bool,
     show_library: bool,
+    #[serde(default = "yes")]
+    shadows: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// An in-progress furniture drag. The unsnapped pose is tracked separately so the
@@ -49,6 +55,23 @@ pub struct FurnitureDrag {
     /// Where the dragged piece started; the rest of the selection keeps its offset to it.
     pub start: Pos2,
     pub others: Vec<(usize, Pos2)>,
+    /// Height (meters) of the level plane the piece slides on: where it was grabbed, so the
+    /// part under the pointer stays under it.
+    pub grab_height: f32,
+    /// Set while Ctrl is held in 3D: the piece moves up, down and sideways on an upright
+    /// plane, like along a wall, instead of over the floor.
+    pub upright: Option<UprightDrag>,
+}
+
+/// Moving furniture on an upright plane (see [`FurnitureDrag::upright`]).
+pub struct UprightDrag {
+    /// The plane's normal on the plan, and a point on it (plan units).
+    pub normal: Vec2,
+    pub point: Pos2,
+    /// Where the pointer ray first hit the plane, in 3D meters.
+    pub anchor: glam::Vec3,
+    /// Each moving piece's position and height above the floor when it started.
+    pub originals: Vec<(usize, Pos2, f32)>,
 }
 
 /// An in-progress rotation of the selected furniture with the rotation handle.
@@ -158,6 +181,21 @@ pub struct RoomPlannerApp {
 
     pub furniture: Vec<Furniture>,
     pub finishes: Finishes,
+    /// All layouts of the plan; the shown one's furniture and finishes are the fields
+    /// above (see `crate::layouts`).
+    pub layouts: Vec<crate::models::Layout>,
+    pub active_layout: usize,
+    /// The layout the shown one is compared with: the one shown before it.
+    pub compare_layout: Option<usize>,
+    /// While a layout is peeked at, the one to go back to.
+    pub peek_return: Option<usize>,
+    /// Outline what differs from the compared layout.
+    pub show_differences: bool,
+    /// Lamps cast shadows in the 3D views.
+    pub shadows: bool,
+    /// The layout tab being renamed, and whether its text field still needs focus.
+    pub renaming_layout: Option<usize>,
+    pub rename_focus_requested: bool,
     pub selected_furniture: Option<usize>,
     /// More furniture selected along with `selected_furniture`, which stays the piece the
     /// properties panel shows. Edits made there are copied to these.
@@ -210,6 +248,8 @@ pub struct RoomPlannerApp {
     pub trackpad_scroll: bool,
     /// The plan from the last session was brought back on start.
     pub restored_draft: bool,
+    /// A camera from a loaded plan, applied together with `pending_fit` instead of fitting.
+    pub pending_camera: Option<crate::models::SavedCamera>,
     pub show_grid: bool,
     /// The camera this frame, set before input is handled.
     pub projection: Projection,
@@ -228,7 +268,8 @@ pub struct RoomPlannerApp {
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
     pub orbit_distance: f32,
-    /// Overview camera target offset from the plan's center, in meters (x, z).
+    /// The point on the floor the overview camera turns around, in meters (x, z). Fixed
+    /// in space, so moving furniture or walls doesn't move the camera.
     pub orbit_pan: Vec2,
 }
 
@@ -279,6 +320,15 @@ impl Default for RoomPlannerApp {
             scroll_zooms: false,
             trackpad_scroll: false,
             restored_draft: false,
+            pending_camera: None,
+            layouts: vec![crate::models::Layout::named(crate::layouts::first_name())],
+            active_layout: 0,
+            compare_layout: None,
+            peek_return: None,
+            show_differences: false,
+            shadows: true,
+            renaming_layout: None,
+            rename_focus_requested: false,
             show_grid: true,
             projection: Projection::default(),
             view_scale: 1.0,
@@ -319,6 +369,7 @@ impl RoomPlannerApp {
                 app.scroll_zooms = prefs.scroll_zooms;
                 app.cut_walls = prefs.cut_walls;
                 app.show_library = prefs.show_library;
+                app.shadows = prefs.shadows;
             }
             if let Some(draft) = eframe::get_value::<Draft>(storage, DRAFT_KEY) {
                 app.restore_draft(draft);
@@ -337,10 +388,11 @@ impl RoomPlannerApp {
                 .current_file
                 .as_ref()
                 .and_then(storage::read_state)
-                .map(|state| Snapshot {
-                    walls: state.walls,
-                    furniture: state.furniture,
-                    finishes: state.finishes,
+                .map(|state| {
+                    // How the app holds that file, to compare with.
+                    let mut on_disk = RoomPlannerApp::default();
+                    storage::apply_state(&mut on_disk, state);
+                    Snapshot::of(&on_disk)
                 })
                 .unwrap_or_default();
         }
@@ -362,7 +414,7 @@ impl RoomPlannerApp {
 
     pub fn new_plan(&mut self) {
         self.walls.clear();
-        self.furniture.clear();
+        crate::layouts::set_all(self, Vec::new(), 0);
         self.rooms.clear();
         self.selected_walls.clear();
         self.select_furniture(None);
@@ -393,9 +445,7 @@ impl RoomPlannerApp {
                 self.pan_offset = view.center().to_vec2() - center.to_vec2() * self.zoom_factor;
             }
             CameraMode::Orbit => {
-                let target = ui::view3d::plan_center(self);
-                let c = Vec2::new(center.x, center.y) / PIXELS_PER_METER;
-                self.orbit_pan = c - Vec2::new(target.x, target.z);
+                self.orbit_pan = Vec2::new(center.x, center.y) / PIXELS_PER_METER;
                 if old == CameraMode::Top {
                     let meters = self.canvas_rect.height() / (self.zoom_factor * PIXELS_PER_METER);
                     self.orbit_distance = (meters * 1.2).clamp(1.5, 80.0);
@@ -456,6 +506,11 @@ impl RoomPlannerApp {
 
     pub fn add_furniture_at(&mut self, mut item: Furniture, position: Pos2) {
         item.position = position;
+        // Library ceiling lights are made for the usual ceiling; follow this room's.
+        if item.on_ceiling() {
+            let ceiling = crate::geometry::walls::ceiling_height_at(&self.walls, position);
+            item.elevation = (item.elevation + ceiling - WALL_HEIGHT).max(0.0);
+        }
         self.furniture.push(item);
         self.select_furniture(Some(self.furniture.len() - 1));
         self.selected_walls.clear();
@@ -745,9 +800,7 @@ impl RoomPlannerApp {
         match self.camera_mode {
             CameraMode::Top => self.zoom_to_rect(bounds),
             CameraMode::Orbit => {
-                let target = ui::view3d::plan_center(self);
-                let c = bounds.center().to_vec2() / PIXELS_PER_METER;
-                self.orbit_pan = c - Vec2::new(target.x, target.z);
+                self.orbit_pan = bounds.center().to_vec2() / PIXELS_PER_METER;
                 let extent = bounds.size().max_elem() / PIXELS_PER_METER;
                 let narrow = (1.0 / self.view3d_aspect.max(0.1)).max(1.0);
                 self.orbit_distance = (extent * 1.3 * narrow + 1.0).clamp(1.5, 80.0);
@@ -809,6 +862,19 @@ impl RoomPlannerApp {
             .unwrap_or(Pos2::new(-1.0e5, -1.0e5))
     }
 
+    /// Like [`Self::screen_to_plane`], but None when the ray misses the plane or hits it
+    /// very far away (near the horizon), where a small pointer move would be a huge jump.
+    pub fn screen_to_plane_near(&self, p: Pos2, height: f32) -> Option<Pos2> {
+        let (origin, dir) = self.projection.ray(p);
+        if dir.y > -1e-3 || origin.y <= height {
+            return None;
+        }
+        let t = (height - origin.y) / dir.y;
+        let hit = origin + dir * t;
+        let far = (hit - self.projection.eye).length() > 40.0;
+        (!far).then(|| Pos2::new(hit.x, hit.z) * PIXELS_PER_METER)
+    }
+
     /// The point under a screen position on the level plane at `height` meters.
     pub fn screen_to_plane(&self, p: Pos2, height: f32) -> Pos2 {
         let (origin, dir) = self.projection.ray(p);
@@ -845,6 +911,26 @@ impl RoomPlannerApp {
         ui::view3d::pick_with_furniture(self, p).1
     }
 
+    /// How far the pointer moved during a drag on the level plane at `height` meters, in
+    /// plan units. Zero where the pointer is near or above the horizon.
+    pub fn plane_drag_delta(&self, response: &egui::Response, height: f32) -> Vec2 {
+        if self.camera_mode == CameraMode::Top {
+            // Straight down without perspective: every level moves alike, no horizon.
+            return self.world_drag_delta(response);
+        }
+        let Some(now) = response.interact_pointer_pos() else {
+            return Vec2::ZERO;
+        };
+        let before = now - response.drag_delta();
+        match (
+            self.screen_to_plane_near(now, height),
+            self.screen_to_plane_near(before, height),
+        ) {
+            (Some(a), Some(b)) => a - b,
+            _ => Vec2::ZERO,
+        }
+    }
+
     /// How far the floor point under the pointer moved during a drag, in plan units.
     pub fn world_drag_delta(&self, response: &egui::Response) -> Vec2 {
         match response.interact_pointer_pos() {
@@ -865,6 +951,21 @@ impl RoomPlannerApp {
             return;
         }
         use egui::Key;
+        // Page Up / Down raise and lower it.
+        let (up, down, big) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::PageUp),
+                i.key_pressed(Key::PageDown),
+                i.modifiers.shift,
+            )
+        });
+        if up || down {
+            let step = if big { 0.1 } else { 0.01 } * if up { 1.0 } else { -1.0 };
+            for i in self.selected_furniture_indices() {
+                let item = &mut self.furniture[i];
+                item.elevation = ((item.elevation + step) * 100.0).round().max(0.0) / 100.0;
+            }
+        }
         let (screen, big) = ctx.input(|i| {
             let mut d = Vec2::ZERO;
             for (key, dir) in [
@@ -907,8 +1008,41 @@ impl RoomPlannerApp {
         }
     }
 
+    /// 1–9 show that layout; holding C shows the compared layout until it is let go.
+    fn layout_keys(&mut self, ctx: &egui::Context) {
+        use egui::Key;
+        let (peek, number) = ctx.input(|i| {
+            let plain = !i.modifiers.command && !i.modifiers.alt;
+            let keys = [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+                Key::Num8,
+                Key::Num9,
+            ];
+            (
+                plain && i.key_down(Key::C),
+                keys.iter().position(|&k| plain && i.key_pressed(k)),
+            )
+        });
+        if peek {
+            crate::layouts::start_peek(self);
+        } else {
+            crate::layouts::end_peek(self);
+        }
+        // While drawing walls, numbers are typed lengths.
+        if let Some(n) = number.filter(|_| self.current_tool != Tool::DrawWall && !peek) {
+            crate::layouts::switch(self, n);
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
+            crate::layouts::end_peek(self);
             return;
         }
         use egui::{Key, KeyboardShortcut, Modifiers};
@@ -937,6 +1071,7 @@ impl RoomPlannerApp {
         if self.camera_mode != CameraMode::Walk {
             self.nudge_furniture(ctx);
         }
+        self.layout_keys(ctx);
 
         // egui turns Ctrl+C/X/V into clipboard events; the key presses are a fallback.
         let (copy, cut, paste, paste_text) = ctx.input(|i| {
@@ -1029,6 +1164,7 @@ impl eframe::App for RoomPlannerApp {
             scroll_zooms: self.scroll_zooms,
             cut_walls: self.cut_walls,
             show_library: self.show_library,
+            shadows: self.shadows,
         };
         eframe::set_value(storage, PREFS_KEY, &prefs);
     }

@@ -42,9 +42,14 @@ pub fn draw_scene(
         draw_room_label(app, painter, room);
     }
 
+    if app.show_differences {
+        draw_differences(app, painter);
+    }
+
     if let Some(item) = app.selected_furniture.and_then(|i| app.furniture.get(i)) {
         if app.extra_furniture.is_empty() {
             draw_wall_distances(app, painter, item);
+            draw_spot_aims(app, painter, item);
         }
         if app.current_tool == Tool::Select {
             draw_rotation_handle(app, painter, item);
@@ -665,8 +670,8 @@ fn draw_furniture_overlay(
             .selected_furniture
             .and_then(|i| app.furniture.get(i))
             .is_some_and(|p| std::ptr::eq(p, item));
-        if let Some(handles) = crate::tools::input::resize_handles(app).filter(|_| primary) {
-            corners = handles.iter().map(|(p, _)| *p).collect();
+        if primary && crate::tools::input::resize_handles(app).is_some() {
+            corners = crate::tools::input::usable_resize_handles(app);
         }
         if selected {
             for corner in corners {
@@ -694,6 +699,9 @@ fn draw_furniture_overlay(
             item.width * 100.0,
             item.depth * 100.0
         );
+        if selected && item.elevation >= 0.005 {
+            text += &format!("\n{:.0} cm above floor", item.elevation * 100.0);
+        }
         if item.options.len() > 1 {
             let letter = (b'A' + (item.active_option % 26) as u8) as char;
             text += &format!("  ·  option {letter}/{}", item.options.len());
@@ -724,12 +732,130 @@ fn draw_furniture_overlay(
 }
 
 /// Dimension lines from the selected piece to the nearest wall in each of its four directions.
+/// For a selected row of spots: a line from each spot to where the middle of its beam
+/// lands, on furniture or the floor.
+fn draw_spot_aims(app: &RoomPlannerApp, painter: &Painter, item: &Furniture) {
+    let aimed = matches!(
+        item.kind,
+        crate::models::FurnitureKind::Lamp { style, .. } if style.has_spots()
+    );
+    if !aimed || app.camera_mode == CameraMode::Top {
+        return;
+    }
+    let color = Color32::from_rgb(240, 170, 30);
+    let turn = Rot2::from_angle(item.rotation);
+    for light in crate::furniture::lamp::lights(item) {
+        let Some((dir, _)) = light.beam else {
+            continue;
+        };
+        let [lx, ly, lz] = light.local;
+        let start = item.local_to_world(lx, lz);
+        let start_y = item.elevation + ly;
+        let along = turn * vec2(dir[0], dir[2]) * PIXELS_PER_METER;
+        // Step along the beam until it reaches the floor or enters a piece.
+        let mut end = (start, start_y);
+        for step in 1..=300 {
+            let t = step as f32 * 0.02;
+            let p = start + along * t;
+            let y = start_y + dir[1] * t;
+            end = (p, y.max(0.0));
+            let inside = app.furniture.iter().any(|other| {
+                !other.is_lamp() && y >= other.elevation && y <= other.top() && other.contains(p)
+            });
+            if y <= 0.0 || inside {
+                break;
+            }
+        }
+        let a = app.world3_to_screen(start, start_y);
+        let b = app.world3_to_screen(end.0, end.1);
+        painter.add(Shape::dashed_line(
+            &[a, b],
+            Stroke::new(1.5, color),
+            5.0,
+            3.0,
+        ));
+        painter.circle_filled(b, 4.0, color);
+        painter.circle_stroke(b, 4.0, Stroke::new(1.0, Color32::WHITE));
+    }
+}
+
+/// Outlines what differs from the compared layout: added and changed pieces as boxes,
+/// pieces only the other layout has as dashed boxes where they would be.
+fn draw_differences(app: &RoomPlannerApp, painter: &Painter) {
+    use crate::ui::layout_tabs::{ADDED, CHANGED, REMOVED};
+    let Some(d) = crate::layouts::current_differences(app) else {
+        return;
+    };
+    let shown = |indices: &[usize], color| {
+        for item in indices.iter().filter_map(|&i| app.furniture.get(i)) {
+            outline_box(app, painter, item, color, false);
+        }
+    };
+    shown(&d.added, ADDED);
+    shown(&d.changed, CHANGED);
+    for item in &d.removed {
+        outline_box(app, painter, item, REMOVED, true);
+    }
+}
+
+/// A box drawn around a piece, solid or dashed.
+fn outline_box(
+    app: &RoomPlannerApp,
+    painter: &Painter,
+    item: &Furniture,
+    color: Color32,
+    dashed: bool,
+) {
+    let footprint = item.footprint();
+    let level = |y: f32| -> Vec<Pos2> {
+        footprint
+            .iter()
+            .map(|p| app.world3_to_screen(*p, y))
+            .collect()
+    };
+    let (bottom, top) = (level(item.elevation), level(item.top()));
+    let stroke = Stroke::new(2.0, color);
+    let line = |a: Pos2, b: Pos2| {
+        if dashed {
+            painter.add(Shape::dashed_line(&[a, b], stroke, 5.0, 4.0));
+        } else {
+            painter.line_segment([a, b], stroke);
+        }
+    };
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        line(top[i], top[j]);
+        if app.camera_mode != CameraMode::Top {
+            line(bottom[i], bottom[j]);
+            line(bottom[i], top[i]);
+        }
+    }
+    if dashed {
+        let center = app.world3_to_screen(item.position, item.top());
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            &item.name,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    } else {
+        // A light fill from above, so small pieces show too.
+        painter.add(Shape::convex_polygon(
+            top,
+            color.gamma_multiply(0.12),
+            Stroke::NONE,
+        ));
+    }
+}
+
 fn draw_wall_distances(app: &RoomPlannerApp, painter: &Painter, item: &Furniture) {
-    let color = Color32::from_rgb(220, 90, 30);
-    let stroke = Stroke::new(1.0, color);
     let rot = Rot2::from_angle(item.rotation);
     let (hw, hd) = (item.width / 2.0, item.depth / 2.0);
     let half_wall = WALL_THICKNESS / 2.0 * PIXELS_PER_METER;
+    // At the height of the piece's underside, so a raised piece measures along the wall
+    // where it hangs.
+    let level = item.elevation;
 
     for (local_dir, half) in [
         (vec2(1.0, 0.0), hw),
@@ -748,24 +874,56 @@ fn draw_wall_distances(app: &RoomPlannerApp, painter: &Painter, item: &Furniture
         if !hit.is_finite() || gap < 0.5 || gap > 8.0 * PIXELS_PER_METER {
             continue;
         }
-        let a = app.world_to_screen(origin);
-        let b = app.world_to_screen(origin + dir * gap);
-        if a.distance(b) < 12.0 {
-            continue;
-        }
-        painter.add(Shape::dashed_line(&[a, b], stroke, 4.0, 3.0));
-        let tick = dir.rot90() * 4.0;
-        painter.line_segment([b - tick, b + tick], stroke);
-        let label = format!("{:.0} cm", gap / PIXELS_PER_METER * 100.0);
-        let galley = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), color);
-        let rect = Rect::from_center_size(a.lerp(b, 0.5), galley.size()).expand(2.0);
-        painter.rect_filled(
-            rect,
-            3.0,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 230),
-        );
-        painter.galley(rect.min + vec2(2.0, 2.0), galley, color);
+        let a = app.world3_to_screen(origin, level);
+        let b = app.world3_to_screen(origin + dir * gap, level);
+        dimension_line(painter, a, b, gap / PIXELS_PER_METER);
     }
+
+    // Down to whatever is under a raised piece: the furniture it hangs above, or the floor.
+    if level >= 0.005 && app.camera_mode != CameraMode::Top {
+        let footprint = item.footprint();
+        let below = app
+            .furniture
+            .iter()
+            .filter(|o| !std::ptr::eq(*o, item) && o.top() <= level + 0.005)
+            .filter(|o| {
+                let theirs = o.footprint();
+                o.contains(item.position)
+                    || item.contains(o.position)
+                    || footprint.iter().any(|&c| o.contains(c))
+                    || theirs.iter().any(|&c| item.contains(c))
+            })
+            .map(|o| o.top())
+            .fold(0.0, f32::max);
+        let gap = level - below;
+        if gap >= 0.005 {
+            let a = app.world3_to_screen(item.position, level);
+            let b = app.world3_to_screen(item.position, below);
+            dimension_line(painter, a, b, gap);
+        }
+    }
+}
+
+/// An orange dashed measuring line from `a` to `b` on screen, with a tick at `b` and the
+/// length (meters) written in the middle.
+fn dimension_line(painter: &Painter, a: Pos2, b: Pos2, meters: f32) {
+    if a.distance(b) < 12.0 {
+        return;
+    }
+    let color = Color32::from_rgb(220, 90, 30);
+    let stroke = Stroke::new(1.0, color);
+    painter.add(Shape::dashed_line(&[a, b], stroke, 4.0, 3.0));
+    let tick = (b - a).normalized().rot90() * 4.0;
+    painter.line_segment([b - tick, b + tick], stroke);
+    let label = format!("{:.0} cm", meters * 100.0);
+    let galley = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), color);
+    let rect = Rect::from_center_size(a.lerp(b, 0.5), galley.size()).expand(2.0);
+    painter.rect_filled(
+        rect,
+        3.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 230),
+    );
+    painter.galley(rect.min + vec2(2.0, 2.0), galley, color);
 }
 
 /// Furniture being dragged in from the library, before it is dropped.
