@@ -255,6 +255,13 @@ mod tests {
         // Older versions read the shown layout.
         assert!(state.furniture.is_empty());
 
+        // Showing another layout is not an unsaved change.
+        app.mark_saved(false);
+        crate::layouts::switch(&mut app, 0);
+        assert!(!app.is_dirty());
+        app.furniture.clear();
+        assert!(app.is_dirty());
+
         let mut other = RoomPlannerApp::default();
         apply_state(&mut other, state);
         assert_eq!(other.layouts.len(), 2);

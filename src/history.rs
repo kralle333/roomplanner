@@ -17,6 +17,21 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Every layout complete, the shown one included.
+    fn all_layouts(&self) -> Vec<Layout> {
+        let mut layouts = self.layouts.clone();
+        if let Some(shown) = layouts.get_mut(self.active_layout) {
+            shown.furniture = self.furniture.clone();
+            shown.finishes = self.finishes;
+        }
+        layouts
+    }
+
+    /// The same plan, whichever layout is shown.
+    pub fn same_content(&self, other: &Snapshot) -> bool {
+        self.walls == other.walls && self.all_layouts() == other.all_layouts()
+    }
+
     pub fn of(app: &RoomPlannerApp) -> Self {
         // While peeking at another layout, the plan is as it was before the peek.
         if let Some(back) = app.peek_return {

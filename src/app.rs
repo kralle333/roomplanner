@@ -379,6 +379,16 @@ impl RoomPlannerApp {
     }
 
     fn restore_draft(&mut self, draft: Draft) {
+        // Nothing unsaved: the file is the plan, and may have been changed since (by
+        // another copy of the app, or by hand), so open it as it is now.
+        let on_disk = draft.file.as_ref().filter(|_| !draft.unsaved);
+        if let Some(state) = on_disk.and_then(storage::read_state) {
+            storage::apply_state(self, state);
+            self.current_file = draft.file.clone();
+            self.mark_saved(true);
+            self.restored_draft = true;
+            return;
+        }
         storage::apply_state(self, draft.plan);
         self.current_file = draft.file.filter(|f| f.exists());
         self.mark_saved(true);
@@ -408,8 +418,9 @@ impl RoomPlannerApp {
         self.saved = snapshot;
     }
 
+    /// Whether the plan differs from the file. Which layout is shown doesn't count.
     pub fn is_dirty(&self) -> bool {
-        Snapshot::of(self) != self.saved
+        !Snapshot::of(self).same_content(&self.saved)
     }
 
     pub fn new_plan(&mut self) {
